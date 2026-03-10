@@ -8,6 +8,8 @@ const OrderItemSchema = new mongoose.Schema(
     quantity: { type: Number, required: true, min: 1 },
     notes: { type: String, default: "" },
     subtotal: { type: Number, required: true },
+    /** When true, item was added to an existing ready order — kitchen should prepare only these. */
+    isAddOn: { type: Boolean, default: false },
   },
   { _id: false }
 );
@@ -37,6 +39,7 @@ const OrderSchema = new mongoose.Schema(
     servedBy: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
     kotPrinted: { type: Boolean, default: false },
     kotPrintedAt: { type: Date },
+    promisedPrepMinutes: { type: Number, default: null },
   },
   { timestamps: true }
 );

@@ -44,7 +44,7 @@ router.get("/", authenticate, async (req: AuthenticatedRequest, res: Response) =
 router.post("/", authenticate, async (req: AuthenticatedRequest, res: Response) => {
   try {
     await connectDB();
-    const { type, items, customerName, customerId, tableNumber, notes, discount } = req.body;
+    const { type, items, customerName, customerId, tableNumber, notes, discount, status } = req.body;
 
     if (!type || !items?.length) {
       return sendError(res, "Order type and items are required", 400);
@@ -63,9 +63,15 @@ router.post("/", authenticate, async (req: AuthenticatedRequest, res: Response) 
 
     const total = subtotal + taxAmount - discountAmount;
 
+    const orderStatus =
+      status && ["open", "accepted", "rejected", "preparing", "ready"].includes(status)
+        ? status
+        : "accepted";
+
     const order = await Order.create({
       orderNumber: generateOrderNumber(),
       type,
+      status: orderStatus,
       items: items.map((item: any) => ({ ...item, subtotal: item.quantity * item.price })),
       customerName: customerName || "Walk-in",
       customer: customerId || null,
@@ -102,7 +108,14 @@ router.get("/:id", authenticate, async (req: AuthenticatedRequest, res: Response
 router.patch("/:id", authenticate, async (req: AuthenticatedRequest, res: Response) => {
   try {
     await connectDB();
-    const allowedFields = ["status", "notes", "kotPrinted", "kotPrintedAt", "tableNumber"];
+    const allowedFields = [
+      "status",
+      "notes",
+      "kotPrinted",
+      "kotPrintedAt",
+      "tableNumber",
+      "promisedPrepMinutes",
+    ];
     const updates: Record<string, unknown> = {};
     allowedFields.forEach((field) => {
       if (req.body[field] !== undefined) updates[field] = req.body[field];
@@ -136,7 +149,7 @@ router.delete("/:id", authenticate, async (req: AuthenticatedRequest, res: Respo
 router.patch("/:id/items", authenticate, async (req: AuthenticatedRequest, res: Response) => {
   try {
     await connectDB();
-    const { items } = req.body;
+    const { items, status } = req.body;
 
     const order = await Order.findById(req.params.id);
     if (!order) return sendError(res, "Order not found", 404);
@@ -149,16 +162,26 @@ router.patch("/:id/items", authenticate, async (req: AuthenticatedRequest, res: 
     const discountAmount = order.discountAmount || 0;
     const total = subtotal + taxAmount - discountAmount;
 
-    const updated = await Order.findByIdAndUpdate(
-      req.params.id,
-      {
-        items: items.map((item: any) => ({ ...item, subtotal: item.quantity * item.price })),
-        subtotal,
-        taxAmount,
-        total,
-      },
-      { new: true }
-    )
+    const updatePayload: Record<string, unknown> = {
+      items: items.map((item: any) => ({
+        product: item.product,
+        name: item.name,
+        price: item.price,
+        quantity: item.quantity,
+        notes: item.notes ?? "",
+        subtotal: item.quantity * item.price,
+        isAddOn: Boolean(item.isAddOn),
+      })),
+      subtotal,
+      taxAmount,
+      total,
+    };
+
+    if (status && ["accepted", "preparing", "ready"].includes(status)) {
+      updatePayload.status = status;
+    }
+
+    const updated = await Order.findByIdAndUpdate(req.params.id, updatePayload, { new: true })
       .populate("customer", "name phone")
       .populate("servedBy", "name");
 

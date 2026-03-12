@@ -5,6 +5,7 @@ import { sendSuccess, sendError, generateInvoiceNumber } from "../lib/utils";
 import Invoice from "../models/Invoice";
 import Order from "../models/Order";
 import Customer from "../models/Customer";
+import { getGstRateForMethod } from "../lib/gst";
 
 const router = Router();
 
@@ -59,7 +60,8 @@ router.post("/", authenticate, async (req: AuthenticatedRequest, res: Response) 
           : discountValue;
     }
 
-    const taxAmount = order.subtotal * 0.1;
+    const gstRatePct = await getGstRateForMethod(paymentMethod);
+    const taxAmount = order.subtotal * (gstRatePct / 100);
     const total = order.subtotal + taxAmount - discountAmount;
     const changeGiven = amountPaid - total;
 
@@ -75,7 +77,7 @@ router.post("/", authenticate, async (req: AuthenticatedRequest, res: Response) 
         subtotal,
       })),
       subtotal: order.subtotal,
-      taxRate: 10,
+      taxRate: gstRatePct,
       taxAmount,
       discountType: discountType || "none",
       discountValue: discountValue || 0,
@@ -88,7 +90,11 @@ router.post("/", authenticate, async (req: AuthenticatedRequest, res: Response) 
       issuedBy: req.user.id,
     });
 
-    await Order.findByIdAndUpdate(orderId, { status: "completed" });
+    await Order.findByIdAndUpdate(orderId, {
+      status: "completed",
+      taxAmount,
+      total,
+    });
 
     if (order.customer) {
       await Customer.findByIdAndUpdate(order.customer, {

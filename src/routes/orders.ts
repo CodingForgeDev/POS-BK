@@ -3,6 +3,7 @@ import { authenticate, AuthenticatedRequest } from "../middleware/auth";
 import { connectDB } from "../lib/mongodb";
 import { sendSuccess, sendError, generateOrderNumber } from "../lib/utils";
 import Order from "../models/Order";
+import { getGstRateForMethod } from "../lib/gst";
 
 const router = Router();
 
@@ -44,14 +45,15 @@ router.get("/", authenticate, async (req: AuthenticatedRequest, res: Response) =
 router.post("/", authenticate, async (req: AuthenticatedRequest, res: Response) => {
   try {
     await connectDB();
-    const { type, items, customerName, customerId, tableNumber, notes, discount, status } = req.body;
+    const { type, items, customerName, customerId, tableNumber, notes, discount, status, paymentMethod } = req.body;
 
     if (!type || !items?.length) {
       return sendError(res, "Order type and items are required", 400);
     }
 
     const subtotal = items.reduce((sum: number, item: any) => sum + item.quantity * item.price, 0);
-    const taxAmount = subtotal * 0.1;
+    const gstRatePct = await getGstRateForMethod(paymentMethod || "default");
+    const taxAmount = subtotal * (gstRatePct / 100);
     let discountAmount = 0;
 
     if (discount) {
@@ -158,7 +160,8 @@ router.patch("/:id/items", authenticate, async (req: AuthenticatedRequest, res: 
     }
 
     const subtotal = items.reduce((sum: number, item: any) => sum + item.quantity * item.price, 0);
-    const taxAmount = subtotal * 0.1;
+    const gstRatePct = await getGstRateForMethod("default");
+    const taxAmount = subtotal * (gstRatePct / 100);
     const discountAmount = order.discountAmount || 0;
     const total = subtotal + taxAmount - discountAmount;
 

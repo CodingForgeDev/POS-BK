@@ -122,6 +122,9 @@ router.patch("/:id", authenticate, async (req: AuthenticatedRequest, res: Respon
     allowedFields.forEach((field) => {
       if (req.body[field] !== undefined) updates[field] = req.body[field];
     });
+    if (updates.status === "preparing") {
+      updates.preparingStartedAt = new Date();
+    }
 
     const order = await Order.findByIdAndUpdate(req.params.id, updates, { new: true })
       .populate("customer", "name phone")

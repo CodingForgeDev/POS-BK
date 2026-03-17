@@ -40,6 +40,8 @@ const OrderSchema = new mongoose.Schema(
     kotPrinted: { type: Boolean, default: false },
     kotPrintedAt: { type: Date },
     promisedPrepMinutes: { type: Number, default: null },
+    /** Set when status becomes "preparing" — used for countdown timer on kitchen display. */
+    preparingStartedAt: { type: Date, default: null },
   },
   { timestamps: true }
 );

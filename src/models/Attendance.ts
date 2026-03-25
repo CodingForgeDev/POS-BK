@@ -1,5 +1,6 @@
 import mongoose from "mongoose";
 
+// One row per employee per calendar day (see attendanceHelpers.parseAttendanceDay for day boundaries).
 const AttendanceSchema = new mongoose.Schema(
   {
     employee: { type: mongoose.Schema.Types.ObjectId, ref: "Employee", required: true },

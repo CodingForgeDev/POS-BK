@@ -1,9 +1,13 @@
 import mongoose from "mongoose";
 
+// Login role / permissions live on `User`. PATCH /employees/:id updates `User.role` only for admins.
 const EmployeeSchema = new mongoose.Schema(
   {
     user: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true },
     employeeId: { type: String, unique: true, required: true },
+    // ZKTeco device User/PIN identifier (e.g. MB460/ID “User ID” / “PIN”).
+    // If not provided, we fall back to employeeId for backward compatibility.
+    deviceUserId: { type: String, default: null },
     position: { type: String, required: true },
     department: { type: String, required: true },
     salary: { type: Number, default: 0 },

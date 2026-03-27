@@ -27,7 +27,7 @@ export interface ZkPullSyncDiagnostics {
   upsertNoop: number;
   /** Rejected: employee not found for deviceUserId / employeeId. */
   employeeNotFound: number;
-  /** Rejected: could not infer in/out. */
+  /** Always 0 — resolveEffectivePunchType always returns a direction now; kept for API backward compatibility. */
   unknownPunchType: number;
   /** Rejected: orphan_out, out_before_in, etc. */
   otherRejected: number;

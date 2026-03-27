@@ -10,6 +10,7 @@ import {
   parseAttendanceDay,
   parseClockFieldFromBody,
 } from "../lib/attendanceHelpers";
+import { endOfBusinessDay, startOfBusinessMonth, endOfBusinessMonth } from "../lib/appTimezone";
 
 const router = Router();
 
@@ -29,8 +30,7 @@ router.get("/", authenticate, async (req: AuthenticatedRequest, res: Response) =
     if (date) {
       const start = parseAttendanceDay(date);
       if (!start) return sendError(res, "Invalid date", 400);
-      const end = new Date(start);
-      end.setHours(23, 59, 59, 999);
+      const end = endOfBusinessDay(start);
       query.date = { $gte: start, $lte: end };
     } else if (month && year) {
       const m = Number.parseInt(month, 10);
@@ -38,8 +38,8 @@ router.get("/", authenticate, async (req: AuthenticatedRequest, res: Response) =
       if (!Number.isFinite(m) || m < 1 || m > 12 || !Number.isFinite(y) || y < 1970 || y > 2100) {
         return sendError(res, "Invalid month or year", 400);
       }
-      const start = new Date(y, m - 1, 1);
-      const end = new Date(y, m, 0, 23, 59, 59, 999);
+      const start = startOfBusinessMonth(y, m);
+      const end = endOfBusinessMonth(y, m);
       query.date = { $gte: start, $lte: end };
     }
 

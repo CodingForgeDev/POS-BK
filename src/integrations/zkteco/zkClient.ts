@@ -1,4 +1,3 @@
-/* eslint-disable @typescript-eslint/no-explicit-any */
 // Thin adapter around `node-zklib` for TCP attendance download.
 // Comm key: `node-zklib` only sends empty CMD_CONNECT — protected devices need CMD_AUTH (see zkTcpAuth.ts).
 

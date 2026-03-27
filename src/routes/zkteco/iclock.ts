@@ -39,13 +39,9 @@ router.get("/cdata", async (req: Request, res: Response) => {
   }
 });
 
-// /iclock/getrequest = device asking "any commands for me?"
-// When the device includes INFO (i.e. it has recorded a scan), we respond with a
-// DATA QUERY command so the device uploads its ATTLOG to us immediately.
-// When no INFO is present (regular keep-alive poll), we respond with "OK".
-// Device polls getrequest to check for pending commands.
-// MB460/pushver 2.x does not support DATA QUERY ATTLOG — respond "OK" always.
-// Uploads are triggered via ATTLOGStamp=0 in the /iclock/cdata handshake.
+// /iclock/getrequest = device keep-alive poll ("any commands for me?").
+// MB460/pushver 2.x does not support DATA QUERY ATTLOG — always respond "OK".
+// Attendance uploads are triggered by ATTLOGStamp=0 in the /iclock/cdata handshake instead.
 router.get("/getrequest", (_req, res: Response) => {
   res.status(200).type("text/plain").send("OK");
 });

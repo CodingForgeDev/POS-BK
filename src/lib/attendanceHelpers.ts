@@ -1,3 +1,12 @@
+/**
+ * Generic attendance utility helpers.
+ *
+ * Used by: manual attendance API (routes/attendance.ts),
+ *          device upsert layer (lib/deviceAttendanceUpsert.ts).
+ *
+ * All date boundaries are computed in APP_TIMEZONE via appTimezone.ts —
+ * changing APP_TIMEZONE in .env is the only change needed for a new country.
+ */
 import mongoose from "mongoose";
 import { startOfBusinessDay, parseBusinessDay } from "./appTimezone";
 

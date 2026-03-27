@@ -71,6 +71,33 @@ export function parseBusinessDay(input: unknown): Date | null {
 }
 
 /**
+ * Returns the last millisecond of the given Date's day in the business timezone.
+ * Use for inclusive upper bounds on single-day attendance queries.
+ */
+export function endOfBusinessDay(date: Date): Date {
+  const tz = getAppTimezone();
+  return DateTime.fromJSDate(date, { zone: tz }).endOf("day").toJSDate();
+}
+
+/**
+ * Returns midnight of the first day of the given month in the business timezone.
+ * Month is 1-based (1 = January).
+ */
+export function startOfBusinessMonth(year: number, month: number): Date {
+  const tz = getAppTimezone();
+  return DateTime.fromObject({ year, month, day: 1 }, { zone: tz }).startOf("month").toJSDate();
+}
+
+/**
+ * Returns the last millisecond of the last day of the given month in the business timezone.
+ * Month is 1-based (1 = January).
+ */
+export function endOfBusinessMonth(year: number, month: number): Date {
+  const tz = getAppTimezone();
+  return DateTime.fromObject({ year, month, day: 1 }, { zone: tz }).endOf("month").toJSDate();
+}
+
+/**
  * Formats a Date for display/logging in the business timezone (ISO with offset).
  */
 export function formatInBusinessTz(date: Date | null | undefined): string {

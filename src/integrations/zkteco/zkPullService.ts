@@ -1,3 +1,17 @@
+/**
+ * ZKTeco TCP pull-sync service — PRIMARY attendance ingestion path.
+ *
+ * Orchestrates one complete sync cycle:
+ *   1. Fetch raw 40-byte attendance buffers from device (zkClient.ts).
+ *   2. Decode + timezone-correct each record (zkNormalizer.ts).
+ *   3. Sort records by (employee, timestamp) — device buffer is NOT chronological.
+ *   4. Skip already-processed records (ZkPullDedupe fingerprint check).
+ *   5. Upsert each punch into the Attendance collection (deviceAttendanceUpsert.ts).
+ *   6. Persist sync-run metadata (ZkPullSyncState).
+ *
+ * Scheduling (startup + interval) lives in zkPullScheduler.ts.
+ * Shared clock-in/out upsert logic lives in lib/deviceAttendanceUpsert.ts.
+ */
 import { connectDB } from "../../lib/mongodb";
 import {
   devicePunchTypeFromRawStatus1,
@@ -84,9 +98,13 @@ function shouldRecordDedupeAfterUpsert(res: { saved: boolean; reason?: string })
   return false;
 }
 
+/** Single source of truth for the "skipped" counter used in run results and sync state. */
+function computeLogsSkipped(d: ZkPullSyncDiagnostics): number {
+  return d.parseFailed + d.dedupeSkipped + d.upsertNoop + d.otherRejected + d.employeeNotFound + d.unknownPunchType;
+}
+
 function buildRunResult(d: ZkPullSyncDiagnostics): ZkPullSyncRunResult {
-  const logsSkipped =
-    d.parseFailed + d.dedupeSkipped + d.upsertNoop + d.otherRejected + d.employeeNotFound + d.unknownPunchType;
+  const logsSkipped = computeLogsSkipped(d);
   return {
     ok: true,
     logsFetched: d.rawRecordsFetched,
@@ -109,19 +127,11 @@ export async function runZkPullSync(override?: Partial<ZkPullConfig>): Promise<Z
   }
 
   const base = getZkPullConfig();
+  // Spread base then override; only deviceIp needs post-processing (trim).
   const cfg: ZkPullConfig = {
     ...base,
     ...override,
-    enabled: override?.enabled ?? base.enabled,
     deviceIp: (override?.deviceIp ?? base.deviceIp).trim(),
-    devicePort: override?.devicePort ?? base.devicePort,
-    timeoutMs: override?.timeoutMs ?? base.timeoutMs,
-    udpInPort: override?.udpInPort ?? base.udpInPort,
-    devicePassword: override?.devicePassword ?? base.devicePassword,
-    debug: override?.debug ?? base.debug,
-    syncOnStartup: override?.syncOnStartup ?? base.syncOnStartup,
-    skipCmdAuth: override?.skipCmdAuth ?? base.skipCmdAuth,
-    commAuthTicks: override?.commAuthTicks ?? base.commAuthTicks,
   };
 
   const ready = isZkPullDeviceConfigured(cfg);
@@ -159,12 +169,20 @@ export async function runZkPullSync(override?: Partial<ZkPullConfig>): Promise<Z
       return a.timestamp.getTime() - b.timestamp.getTime();
     });
 
-    for (const log of decodedLogs) {
+    // Pre-compute fingerprints and fetch all already-seen ones in a single $in query.
+    // Avoids N individual findOne round-trips (one per record) on every sync cycle.
+    const decodedWithFp = decodedLogs.map((log) => ({ log, fingerprint: zkPullFingerprint(log) }));
+    const allFingerprints = decodedWithFp.map((x) => x.fingerprint);
+    const existingDocs = await ZkPullDedupe
+      .find({ fingerprint: { $in: allFingerprints } })
+      .select("fingerprint")
+      .lean();
+    const seenFingerprints = new Set(existingDocs.map((doc) => doc.fingerprint));
+
+    for (const { log, fingerprint } of decodedWithFp) {
       d.normalizedOk += 1;
 
-      const fingerprint = zkPullFingerprint(log);
-      const already = await ZkPullDedupe.findOne({ fingerprint }).select("_id").lean();
-      if (already) {
+      if (seenFingerprints.has(fingerprint)) {
         d.dedupeSkipped += 1;
         continue;
       }
@@ -195,6 +213,8 @@ export async function runZkPullSync(override?: Partial<ZkPullConfig>): Promise<Z
           zkPullLog(cfg, `employee_not_found deviceUserId=${log.deviceUserId} — set Employee.deviceUserId to this PIN in the edit dialog`);
         }
       } else if (res.reason === "unknown_punch_type") {
+        // TODO: dead branch — resolveEffectivePunchType no longer returns null;
+        // remove unknownPunchType tracking in a future cleanup pass.
         d.unknownPunchType += 1;
       } else if (!res.reason) {
         d.upsertNoop += 1;
@@ -241,11 +261,12 @@ export async function runZkPullSync(override?: Partial<ZkPullConfig>): Promise<Z
     return summary;
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
+    const failedSkipped = computeLogsSkipped(d);
     await persistSyncState({
       lastSuccess: false,
       logsFetched: d.rawRecordsFetched,
       logsProcessed: d.upsertApplied,
-      logsSkipped: d.parseFailed + d.dedupeSkipped + d.upsertNoop + d.otherRejected + d.employeeNotFound + d.unknownPunchType,
+      logsSkipped: failedSkipped,
       employeeNotFound: d.employeeNotFound,
       unknownPunchType: d.unknownPunchType,
       lastError: msg,
@@ -256,8 +277,7 @@ export async function runZkPullSync(override?: Partial<ZkPullConfig>): Promise<Z
       message: msg,
       logsFetched: d.rawRecordsFetched,
       logsProcessed: d.upsertApplied,
-      logsSkipped:
-        d.parseFailed + d.dedupeSkipped + d.upsertNoop + d.otherRejected + d.employeeNotFound + d.unknownPunchType,
+      logsSkipped: failedSkipped,
       employeeNotFound: d.employeeNotFound,
       unknownPunchType: d.unknownPunchType,
       diagnostics: d,

@@ -1,3 +1,12 @@
+/**
+ * ZKTeco TCP pull-sync configuration.
+ *
+ * Reads env variables and exposes a typed ZkPullConfig object.
+ * Single source of truth for all pull-sync settings — change .env, nothing else.
+ *
+ * Key variables: ZK_DEVICE_IP, ZK_PULL_ENABLED, ZK_PULL_INTERVAL_SECONDS,
+ * ZK_DEVICE_TIME_OFFSET_MINUTES, APP_TIMEZONE (shared with attendance).
+ */
 export interface ZkPullConfig {
   enabled: boolean;
   deviceIp: string;

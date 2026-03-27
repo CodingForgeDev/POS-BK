@@ -1,3 +1,18 @@
+/**
+ * Shared device attendance upsert layer.
+ *
+ * Used by BOTH attendance ingestion paths:
+ *   - Primary:  ZKTeco TCP pull sync  (integrations/zkteco/zkPullService.ts)
+ *   - Fallback: ZKTeco ADMS HTTP push (integrations/zkteco/admsAttendanceReceiver.ts)
+ *
+ * Keeps a single per-day Attendance document per employee:
+ *   clockIn  = earliest valid punch
+ *   clockOut = latest valid punch
+ *
+ * IMPORTANT: resolveEffectivePunchType uses existing record STATE, not rawStatus,
+ * to infer in/out direction. ZKTeco devices frequently mark all scans rawStatus=0
+ * regardless of direction — context is always more reliable than the device hint.
+ */
 import Employee from "../models/Employee";
 import Attendance from "../models/Attendance";
 import { computeHoursWorked, startOfLocalDay } from "./attendanceHelpers";

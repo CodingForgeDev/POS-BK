@@ -1,4 +1,17 @@
+/**
+ * ZKTeco ADMS (iClock) HTTP push receiver — FALLBACK attendance ingestion path.
+ *
+ * The device pushes attendance logs to the server over HTTP (port 8081 / 4370).
+ * This is the secondary path; the primary path is the TCP pull sync (zkPullService.ts).
+ *
+ * Responsibilities:
+ *   - Parse raw ADMS tab-delimited attlog lines from the device HTTP POST body.
+ *   - Build the iClock handshake response (ATTLOGStamp, ServerVer, etc.).
+ *   - Forward parsed punches to the shared upsert layer (deviceAttendanceUpsert.ts).
+ */
+import { DateTime } from "luxon";
 import { previewPlainTextForLog } from "../../lib/plainLogPreview";
+import { getAppTimezone } from "../../lib/appTimezone";
 import {
   devicePunchTypeFromRawStatus1,
   upsertDevicePunchToAttendance,
@@ -6,7 +19,6 @@ import {
   type DevicePunchType,
 } from "../../lib/deviceAttendanceUpsert";
 
-export type AdmsPunchType = DevicePunchType;
 export type AdmsAttLogPunch = DeviceAttendancePunch;
 
 export interface AdmsReceiverResult {
@@ -26,7 +38,7 @@ export function splitAdmsBodyIntoLines(rawBody: string): string[] {
     .filter((s) => s.length > 0);
 }
 
-// Strict "YYYY-MM-DD HH:mm:ss" (or space replaced by "T") — local wall time, not UTC.
+// Strict "YYYY-MM-DD HH:mm:ss" (or space replaced by "T") — device wall-clock, treated as APP_TIMEZONE.
 const ADMS_DATETIME_RE = /^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2}):(\d{2})$/;
 
 function parseAdmsTimestamp(value: string | undefined): Date | null {
@@ -43,18 +55,17 @@ function parseAdmsTimestamp(value: string | undefined): Date | null {
   const s = Number(m[6]);
   if ([y, mo, d, h, mi, s].some((n) => Number.isNaN(n))) return null;
   if (mo < 1 || mo > 12 || d < 1 || d > 31 || h > 23 || mi > 59 || s > 59) return null;
-  const ts = new Date(y, mo - 1, d, h, mi, s);
-  if (
-    ts.getFullYear() !== y ||
-    ts.getMonth() !== mo - 1 ||
-    ts.getDate() !== d ||
-    ts.getHours() !== h ||
-    ts.getMinutes() !== mi ||
-    ts.getSeconds() !== s
-  ) {
+  // Interpret device wall-clock as business timezone (APP_TIMEZONE), matching ZK TCP pull normalizer.
+  const dt = DateTime.fromObject(
+    { year: y, month: mo, day: d, hour: h, minute: mi, second: s },
+    { zone: getAppTimezone() }
+  );
+  if (!dt.isValid) return null;
+  // Reject dates where luxon normalised overflowed components (e.g. Feb 30 → Mar 2).
+  if (dt.year !== y || dt.month !== mo || dt.day !== d || dt.hour !== h || dt.minute !== mi || dt.second !== s) {
     return null;
   }
-  return ts;
+  return dt.toJSDate();
 }
 
 function parseIntOrNull(v: string | undefined): number | null {

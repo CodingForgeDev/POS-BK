@@ -1,18 +1,13 @@
-import Employee from "../../models/Employee";
-import Attendance from "../../models/Attendance";
-import { computeHoursWorked, startOfLocalDay } from "../../lib/attendanceHelpers";
 import { previewPlainTextForLog } from "../../lib/plainLogPreview";
+import {
+  devicePunchTypeFromRawStatus1,
+  upsertDevicePunchToAttendance,
+  type DeviceAttendancePunch,
+  type DevicePunchType,
+} from "../../lib/deviceAttendanceUpsert";
 
-export type AdmsPunchType = "in" | "out";
-
-export interface AdmsAttLogPunch {
-  deviceUserId: string;
-  timestamp: Date;
-  // punchType can be null if the device uses a different status value than our default mapping.
-  // In that case we infer in/out from existing Attendance data.
-  punchType: AdmsPunchType | null;
-  rawStatus1?: number | null;
-}
+export type AdmsPunchType = DevicePunchType;
+export type AdmsAttLogPunch = DeviceAttendancePunch;
 
 export interface AdmsReceiverResult {
   receivedLines: number;
@@ -70,76 +65,9 @@ function parseIntOrNull(v: string | undefined): number | null {
   return Number.isNaN(n) ? null : n;
 }
 
-/** Maps device verify state (status1) to in/out using env-configured values. */
-function inferPunchTypeFromDeviceStatus(
-  status1: number | null,
-  inValue: number,
-  outValue: number
-): AdmsPunchType | null {
-  if (status1 === null) return null;
-  if (status1 === inValue) return "in";
-  if (status1 === outValue) return "out";
-  return null;
-}
-
-type AttendanceClockFields = {
-  clockIn: Date | null | undefined;
-  clockOut: Date | null | undefined;
-  hoursWorked?: number;
-};
-
-/** When the device omits or uses unknown status codes, derive in/out from existing row + timestamps. */
-function resolveEffectivePunchType(punch: AdmsAttLogPunch, existing: AttendanceClockFields | null): AdmsPunchType | null {
-  if (punch.punchType) return punch.punchType;
-  if (!existing) return "in";
-  if (!existing.clockIn) return "in";
-  if (!existing.clockOut) return "out";
-  if (punch.timestamp <= existing.clockIn) return "in";
-  if (punch.timestamp >= existing.clockOut) return "out";
-  return null;
-}
-
-/** Earlier clock-in wins (device may resend corrections). */
-function tryApplyDeviceClockIn(existing: AttendanceClockFields, punchTs: Date): boolean {
-  if (!existing.clockIn || punchTs.getTime() < existing.clockIn.getTime()) {
-    existing.clockIn = punchTs;
-    return true;
-  }
-  return false;
-}
-
-/**
- * Later clock-out wins, but never record out before the day's clock-in (out-of-order uploads).
- */
-function tryApplyDeviceClockOut(
-  existing: AttendanceClockFields,
-  punchTs: Date
-): { applied: boolean; rejectReason?: "out_before_in" } {
-  if (existing.clockIn && punchTs.getTime() < existing.clockIn.getTime()) {
-    return { applied: false, rejectReason: "out_before_in" };
-  }
-  if (!existing.clockOut || punchTs.getTime() > existing.clockOut.getTime()) {
-    existing.clockOut = punchTs;
-    return { applied: true };
-  }
-  return { applied: false };
-}
-
-function refreshHoursWorkedField(existing: AttendanceClockFields): boolean {
-  const hours = computeHoursWorked(existing.clockIn ?? null, existing.clockOut ?? null);
-  if (existing.hoursWorked !== hours) {
-    existing.hoursWorked = hours;
-    return true;
-  }
-  return false;
-}
-
 export function parseAdmsAttLog(rawBody: string): { punches: AdmsAttLogPunch[]; receivedLines: number } {
   const lines = splitAdmsBodyIntoLines(rawBody);
   const receivedLines = lines.length;
-
-  const inValue = Number.parseInt(process.env.ZKTECO_CLOCK_IN_VALUE ?? "0", 10);
-  const outValue = Number.parseInt(process.env.ZKTECO_CLOCK_OUT_VALUE ?? "1", 10);
 
   const punches: AdmsAttLogPunch[] = [];
 
@@ -154,7 +82,7 @@ export function parseAdmsAttLog(rawBody: string): { punches: AdmsAttLogPunch[]; 
     const status1 = parseIntOrNull(fields[2]);
     if (!deviceUserId || !ts) continue;
 
-    const punchType = inferPunchTypeFromDeviceStatus(status1, inValue, outValue);
+    const punchType = devicePunchTypeFromRawStatus1(status1);
 
     punches.push({
       deviceUserId,
@@ -165,56 +93,6 @@ export function parseAdmsAttLog(rawBody: string): { punches: AdmsAttLogPunch[]; 
   }
 
   return { punches, receivedLines };
-}
-
-async function upsertPunchToAttendance(punch: AdmsAttLogPunch): Promise<{ saved: boolean; reason?: string }> {
-  // Prefer explicit deviceUserId mapping (clean + stable), but keep fallback for older data.
-  const employee = await Employee.findOne({
-    $or: [{ deviceUserId: punch.deviceUserId }, { employeeId: punch.deviceUserId }],
-  }).select("_id");
-  if (!employee?._id) return { saved: false, reason: "employee_not_found" };
-
-  const day = startOfLocalDay(punch.timestamp);
-
-  const existing = await Attendance.findOne({ employee: employee._id, date: day });
-
-  const effectiveType = resolveEffectivePunchType(punch, existing);
-
-  if (!effectiveType) return { saved: false, reason: "unknown_punch_type" };
-
-  if (!existing) {
-    if (effectiveType === "out") {
-      return { saved: false, reason: "orphan_out" };
-    }
-
-    const created = new Attendance({
-      employee: employee._id,
-      date: day,
-      clockIn: punch.timestamp,
-      clockOut: null,
-      hoursWorked: 0,
-      status: "present",
-      notes: "",
-    });
-
-    await created.save();
-    return { saved: true };
-  }
-
-  let changed = false;
-
-  if (effectiveType === "in") {
-    if (tryApplyDeviceClockIn(existing, punch.timestamp)) changed = true;
-  } else {
-    const out = tryApplyDeviceClockOut(existing, punch.timestamp);
-    if (out.rejectReason) return { saved: false, reason: out.rejectReason };
-    if (out.applied) changed = true;
-  }
-
-  if (refreshHoursWorkedField(existing)) changed = true;
-
-  if (changed) await existing.save();
-  return { saved: changed };
 }
 
 export async function handleAdmsAttLogPost(rawBody: string): Promise<AdmsReceiverResult> {
@@ -232,7 +110,7 @@ export async function handleAdmsAttLogPost(rawBody: string): Promise<AdmsReceive
   let skipped = 0;
 
   for (const punch of punches) {
-    const result = await upsertPunchToAttendance(punch);
+    const result = await upsertDevicePunchToAttendance(punch);
     if (result.saved) savedPunches += 1;
     else if (result.reason === "employee_not_found") employeeNotFound += 1;
     else skipped += 1;
@@ -282,4 +160,3 @@ export function buildAdmsHandshakeResponse(sn: string | undefined): string {
     `Encrypt=0\r\n`
   );
 }
-

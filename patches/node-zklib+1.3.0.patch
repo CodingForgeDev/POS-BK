@@ -1,0 +1,17 @@
+diff --git a/node_modules/node-zklib/zklibtcp.js b/node_modules/node-zklib/zklibtcp.js
+index 194a9d8..6e53b34 100644
+--- a/node_modules/node-zklib/zklibtcp.js
++++ b/node_modules/node-zklib/zklibtcp.js
+@@ -229,6 +229,12 @@ class ZKLibTCP {
+ 
+       } catch (err) {
+         reject(err)
++        return
++      }
++
++      if (!reply || reply.length < 16) {
++        reject(new Error('ZK TCP: empty reply to data request (check comm key / CMD_AUTH or device state)'))
++        return
+       }
+ 
+       const header = decodeTCPHeader(reply.subarray(0, 16))

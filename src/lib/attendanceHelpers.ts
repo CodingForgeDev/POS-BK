@@ -1,20 +1,23 @@
 import mongoose from "mongoose";
+import { startOfBusinessDay, parseBusinessDay } from "./appTimezone";
 
 export const ATTENDANCE_STATUSES = ["present", "absent", "late", "half-day", "leave"] as const;
 export type AttendanceStatus = (typeof ATTENDANCE_STATUSES)[number];
 
+/**
+ * Returns midnight of the given Date in the business timezone (APP_TIMEZONE).
+ * Used by device push / pull sync to determine which calendar day a punch belongs to.
+ */
 export function startOfLocalDay(d: Date): Date {
-  const day = new Date(d);
-  day.setHours(0, 0, 0, 0);
-  return day;
+  return startOfBusinessDay(d);
 }
 
-/** Calendar day for attendance queries / unique index (local midnight). */
+/**
+ * Parses a date value into the start-of-day in the business timezone (APP_TIMEZONE).
+ * Used by the manual attendance API and query filters.
+ */
 export function parseAttendanceDay(dateInput: unknown): Date | null {
-  if (dateInput == null || dateInput === "") return null;
-  const d = new Date(dateInput as string | Date);
-  if (Number.isNaN(d.getTime())) return null;
-  return startOfLocalDay(d);
+  return parseBusinessDay(dateInput);
 }
 
 export type ParseClockFieldResult = { kind: "omit" } | { kind: "invalid" } | { kind: "ok"; date: Date };

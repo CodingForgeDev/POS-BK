@@ -85,7 +85,15 @@ router.post("/", authenticate, async (req: AuthenticatedRequest, res: Response) 
       return sendError(res, "Clock in is required before clock out", 400);
     }
 
-    if (mergedIn !== undefined && mergedOut !== undefined && mergedOut.getTime() < mergedIn.getTime()) {
+    // Only reject when both are explicitly supplied in this request — prevents human typos
+    // but does not block manual clock-outs when clockIn was stored with a wrong device timestamp.
+    if (
+      inRes.kind === "ok" &&
+      outRes.kind === "ok" &&
+      mergedIn !== undefined &&
+      mergedOut !== undefined &&
+      mergedOut.getTime() < mergedIn.getTime()
+    ) {
       return sendError(res, "clockOut cannot be earlier than clockIn", 400);
     }
 

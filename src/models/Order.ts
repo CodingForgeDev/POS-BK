@@ -34,6 +34,8 @@ const OrderSchema = new mongoose.Schema(
     subtotal: { type: Number, required: true },
     taxAmount: { type: Number, default: 0 },
     discountAmount: { type: Number, default: 0 },
+    /** Dine-in only; % from settings applied to (subtotal − discount). Takeaway/delivery: 0. */
+    serviceChargeAmount: { type: Number, default: 0 },
     total: { type: Number, required: true },
     notes: { type: String, default: "" },
     servedBy: { type: mongoose.Schema.Types.ObjectId, ref: "User" },

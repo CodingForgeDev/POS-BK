@@ -4,6 +4,8 @@ import { connectDB } from "../lib/mongodb";
 import { sendSuccess, sendError, generateOrderNumber } from "../lib/utils";
 import Order from "../models/Order";
 import { getGstRateForMethod } from "../lib/gst";
+import { computeOrderFinancials } from "../lib/orderAmounts";
+import { getDineInServiceChargePercent } from "../lib/serviceCharge";
 
 const router = Router();
 
@@ -52,18 +54,17 @@ router.post("/", authenticate, async (req: AuthenticatedRequest, res: Response) 
     }
 
     const subtotal = items.reduce((sum: number, item: any) => sum + item.quantity * item.price, 0);
-    const gstRatePct = await getGstRateForMethod(paymentMethod || "default");
-    const taxAmount = subtotal * (gstRatePct / 100);
-    let discountAmount = 0;
-
-    if (discount) {
-      discountAmount =
-        discount.type === "percentage"
-          ? (subtotal * discount.value) / 100
-          : discount.value;
-    }
-
-    const total = subtotal + taxAmount - discountAmount;
+    const [gstRatePct, servicePct] = await Promise.all([
+      getGstRateForMethod(paymentMethod || "default"),
+      getDineInServiceChargePercent(),
+    ]);
+    const { discountAmount, serviceChargeAmount, taxAmount, total } = computeOrderFinancials({
+      subtotal,
+      discount,
+      orderType: type,
+      serviceChargePercent: servicePct,
+      gstRatePct,
+    });
 
     const orderStatus =
       status && ["open", "accepted", "rejected", "preparing", "ready"].includes(status)
@@ -82,6 +83,7 @@ router.post("/", authenticate, async (req: AuthenticatedRequest, res: Response) 
       subtotal,
       taxAmount,
       discountAmount,
+      serviceChargeAmount,
       total,
       servedBy: req.user.id,
     });
@@ -163,10 +165,17 @@ router.patch("/:id/items", authenticate, async (req: AuthenticatedRequest, res: 
     }
 
     const subtotal = items.reduce((sum: number, item: any) => sum + item.quantity * item.price, 0);
-    const gstRatePct = await getGstRateForMethod("default");
-    const taxAmount = subtotal * (gstRatePct / 100);
-    const discountAmount = order.discountAmount || 0;
-    const total = subtotal + taxAmount - discountAmount;
+    const [gstRatePct, servicePct] = await Promise.all([
+      getGstRateForMethod("default"),
+      getDineInServiceChargePercent(),
+    ]);
+    const { serviceChargeAmount, taxAmount, total } = computeOrderFinancials({
+      subtotal,
+      discountAmountFixed: order.discountAmount || 0,
+      orderType: order.type,
+      serviceChargePercent: servicePct,
+      gstRatePct,
+    });
 
     const updatePayload: Record<string, unknown> = {
       items: items.map((item: any) => ({
@@ -180,6 +189,7 @@ router.patch("/:id/items", authenticate, async (req: AuthenticatedRequest, res: 
       })),
       subtotal,
       taxAmount,
+      serviceChargeAmount,
       total,
     };
 

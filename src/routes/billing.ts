@@ -7,6 +7,17 @@ import Order from "../models/Order";
 import Customer from "../models/Customer";
 import { getGstRateForMethod } from "../lib/gst";
 
+function invoiceTotalsFromOrder(order: any, gstRatePct: number) {
+  const discountAmount = order.discountAmount || 0;
+  const afterDiscount = Math.max(0, order.subtotal - discountAmount);
+  const serviceChargeAmount = Number(order.serviceChargeAmount) || 0;
+  const taxableBase = afterDiscount + serviceChargeAmount;
+  const rate = Math.max(0, Math.min(100, gstRatePct));
+  const taxAmount = (taxableBase * rate) / 100;
+  const total = taxableBase + taxAmount;
+  return { discountAmount, serviceChargeAmount, taxAmount, total };
+}
+
 const router = Router();
 
 router.get("/", authenticate, async (req: AuthenticatedRequest, res: Response) => {
@@ -52,17 +63,11 @@ router.post("/", authenticate, async (req: AuthenticatedRequest, res: Response) 
     if (!order) return sendError(res, "Order not found", 404);
     if (order.status === "completed") return sendError(res, "Order already billed", 400);
 
-    let discountAmount = 0;
-    if (discountType && discountType !== "none" && discountValue > 0) {
-      discountAmount =
-        discountType === "percentage"
-          ? (order.subtotal * discountValue) / 100
-          : discountValue;
-    }
-
     const gstRatePct = await getGstRateForMethod(paymentMethod);
-    const taxAmount = order.subtotal * (gstRatePct / 100);
-    const total = order.subtotal + taxAmount - discountAmount;
+    const { discountAmount, serviceChargeAmount, taxAmount, total } = invoiceTotalsFromOrder(
+      order,
+      gstRatePct
+    );
     const changeGiven = amountPaid - total;
 
     const invoice = await Invoice.create({
@@ -82,6 +87,7 @@ router.post("/", authenticate, async (req: AuthenticatedRequest, res: Response) 
       discountType: discountType || "none",
       discountValue: discountValue || 0,
       discountAmount,
+      serviceChargeAmount,
       total,
       paymentMethod,
       amountPaid,

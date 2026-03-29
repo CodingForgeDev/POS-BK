@@ -3,31 +3,20 @@
  * Usage: node scripts/seed-menu.js  (or: npm run seed:menu)
  *
  * Notes:
- * - Loads .env.local for MONGODB_URI
+ * - Loads .env.local then .env (same as server/src/lib/env.ts)
  * - Idempotent (upsert by name + category)
  * - Prices are in PKR
  * - Matches existing Category & Product schemas (price, not sellingPrice)
  */
 
 const mongoose = require("mongoose");
-const fs = require("fs");
 const path = require("path");
-
-// Load .env.local
-const envPath = path.join(__dirname, "../.env.local");
-if (fs.existsSync(envPath)) {
-  const lines = fs.readFileSync(envPath, "utf-8").split("\n");
-  for (const line of lines) {
-    const trimmed = line.trim();
-    if (!trimmed || trimmed.startsWith("#")) continue;
-    const [key, ...rest] = trimmed.split("=");
-    process.env[key.trim()] = rest.join("=").trim();
-  }
-}
+require("dotenv").config({ path: path.join(__dirname, "../.env.local") });
+require("dotenv").config({ path: path.join(__dirname, "../.env") });
 
 const MONGODB_URI = process.env.MONGODB_URI;
 if (!MONGODB_URI) {
-  console.error("❌ MONGODB_URI not found in .env.local");
+  console.error("❌ MONGODB_URI not found. Set it in server/.env or server/.env.local");
   process.exit(1);
 }
 

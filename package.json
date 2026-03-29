@@ -10,7 +10,10 @@
     "start": "node dist/index.js",
     "seed:admin": "tsx scripts/seed-admin.js",
     "seed:employees": "tsx scripts/seed-employees.js",
-    "seed:menu": "tsx scripts/seed-menu.js"
+    "seed:menu": "tsx scripts/seed-menu.js",
+    "seed:expenses": "tsx scripts/seed-expenses.js",
+    "seed:orders": "tsx scripts/seed-orders.js",
+    "seed:invoices": "tsx scripts/seed-invoices.js"
   },
   "dependencies": {
     "bcryptjs": "^2.4.3",

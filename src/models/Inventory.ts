@@ -7,6 +7,8 @@ const InventorySchema = new mongoose.Schema(
     category: { type: String, default: "" },
     unit: { type: String, required: true },
     currentStock: { type: Number, required: true, default: 0 },
+    /** Quantity held for orders in progress (e.g. kitchen preparing). */
+    reservedStock: { type: Number, required: true, default: 0 },
     minimumStock: { type: Number, default: 0 },
     maximumStock: { type: Number, default: 1000 },
     costPerUnit: { type: Number, default: 0 },

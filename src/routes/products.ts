@@ -2,6 +2,7 @@ import { Router, Response } from "express";
 import { authenticate, AuthenticatedRequest } from "../middleware/auth";
 import { connectDB } from "../lib/mongodb";
 import { sendSuccess, sendError } from "../lib/utils";
+import { pickProductPayload } from "../lib/productPayload";
 import Product from "../models/Product";
 
 const router = Router();
@@ -17,6 +18,7 @@ router.get("/", authenticate, async (req: AuthenticatedRequest, res: Response) =
 
     const products = await Product.find(query)
       .populate("category", "name color")
+      .populate("recipeLines.inventoryItem", "name unit currentStock minimumStock")
       .sort({ sortOrder: 1, name: 1 })
       .lean();
 
@@ -32,9 +34,17 @@ router.post("/", authenticate, async (req: AuthenticatedRequest, res: Response) 
     if (!["admin", "manager"].includes(req.user.role)) {
       return sendError(res, "Unauthorized", 403);
     }
-    const product = await Product.create(req.body);
-    const populated = await product.populate("category", "name color");
-    return sendSuccess(res, populated, "Product created successfully", 201);
+    let payload: Record<string, unknown>;
+    try {
+      payload = pickProductPayload(req.body as Record<string, unknown>);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : "Invalid payload";
+      return sendError(res, msg, 400);
+    }
+    const product = await Product.create(payload);
+    await product.populate("category", "name color");
+    await product.populate("recipeLines.inventoryItem", "name unit currentStock minimumStock");
+    return sendSuccess(res, product, "Product created successfully", 201);
   } catch (error) {
     return sendError(res, "Failed to create product", 500);
   }
@@ -43,7 +53,9 @@ router.post("/", authenticate, async (req: AuthenticatedRequest, res: Response) 
 router.get("/:id", authenticate, async (req: AuthenticatedRequest, res: Response) => {
   try {
     await connectDB();
-    const product = await Product.findById(req.params.id).populate("category", "name color");
+    const product = await Product.findById(req.params.id)
+      .populate("category", "name color")
+      .populate("recipeLines.inventoryItem", "name unit currentStock minimumStock");
     if (!product) return sendError(res, "Product not found", 404);
     return sendSuccess(res, product);
   } catch (error) {
@@ -57,10 +69,19 @@ router.patch("/:id", authenticate, async (req: AuthenticatedRequest, res: Respon
     if (!["admin", "manager"].includes(req.user.role)) {
       return sendError(res, "Unauthorized", 403);
     }
-    const product = await Product.findByIdAndUpdate(req.params.id, req.body, { new: true }).populate(
-      "category",
-      "name color"
-    );
+    let update: Record<string, unknown>;
+    try {
+      update = pickProductPayload(req.body as Record<string, unknown>);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : "Invalid payload";
+      return sendError(res, msg, 400);
+    }
+    if (Object.keys(update).length === 0) {
+      return sendError(res, "No valid fields to update", 400);
+    }
+    const product = await Product.findByIdAndUpdate(req.params.id, update, { new: true })
+      .populate("category", "name color")
+      .populate("recipeLines.inventoryItem", "name unit currentStock minimumStock");
     if (!product) return sendError(res, "Product not found", 404);
     return sendSuccess(res, product, "Product updated successfully");
   } catch (error) {

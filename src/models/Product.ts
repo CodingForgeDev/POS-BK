@@ -1,5 +1,14 @@
 import mongoose from "mongoose";
 
+/** One ingredient line: amount consumed per 1 sold unit of this product (same unit meaning as the inventory row). */
+const RecipeLineSchema = new mongoose.Schema(
+  {
+    inventoryItem: { type: mongoose.Schema.Types.ObjectId, ref: "Inventory", required: true },
+    quantityPerUnit: { type: Number, required: true, min: 0 },
+  },
+  { _id: false }
+);
+
 const ProductSchema = new mongoose.Schema(
   {
     name: { type: String, required: true, trim: true },
@@ -16,6 +25,7 @@ const ProductSchema = new mongoose.Schema(
     preparationTime: { type: Number, default: 10 },
     allergens: [{ type: String }],
     sortOrder: { type: Number, default: 0 },
+    recipeLines: { type: [RecipeLineSchema], default: [] },
   },
   {
     timestamps: true,

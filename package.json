@@ -11,6 +11,8 @@
     "seed:admin": "tsx scripts/seed-admin.js",
     "seed:employees": "tsx scripts/seed-employees.js",
     "seed:menu": "tsx scripts/seed-menu.js",
+    "seed:inventory:menu": "tsx scripts/seed-inventory-from-menu.js",
+    "seed:recipes:menu": "tsx scripts/seed-recipes-from-menu.js",
     "seed:expenses": "tsx scripts/seed-expenses.js",
     "seed:orders": "tsx scripts/seed-orders.js",
     "seed:invoices": "tsx scripts/seed-invoices.js"

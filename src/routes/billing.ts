@@ -6,6 +6,10 @@ import Invoice from "../models/Invoice";
 import Order from "../models/Order";
 import Customer from "../models/Customer";
 import { getGstRateForMethod } from "../lib/gst";
+import {
+  executeBillingWithRecipeConsumption,
+  InsufficientStockError,
+} from "../lib/recipeInventory";
 
 function invoiceTotalsFromOrder(order: any, gstRatePct: number) {
   const discountAmount = order.discountAmount || 0;
@@ -68,39 +72,40 @@ router.post("/", authenticate, async (req: AuthenticatedRequest, res: Response) 
       order,
       gstRatePct
     );
-    const changeGiven = amountPaid - total;
 
-    const invoice = await Invoice.create({
-      invoiceNumber: generateInvoiceNumber(),
-      order: orderId,
-      customer: order.customer,
-      customerName: order.customerName,
-      items: order.items.map(({ name, quantity, price, subtotal }: any) => ({
-        name,
-        quantity,
-        price,
-        subtotal,
-      })),
-      subtotal: order.subtotal,
-      taxRate: gstRatePct,
-      taxAmount,
-      discountType: discountType || "none",
-      discountValue: discountValue || 0,
-      discountAmount,
-      serviceChargeAmount,
-      total,
-      paymentMethod,
-      amountPaid,
-      changeGiven: Math.max(0, changeGiven),
-      notes: notes || "",
-      issuedBy: req.user.id,
-    });
-
-    await Order.findByIdAndUpdate(orderId, {
-      status: "completed",
-      taxAmount,
-      total,
-    });
+    let invoice;
+    try {
+      const result = await executeBillingWithRecipeConsumption({
+        orderId,
+        userId: req.user.id,
+        paymentMethod,
+        amountPaid,
+        discountType,
+        discountValue,
+        notes,
+        gstRatePct,
+        invoiceNumber: generateInvoiceNumber(),
+        discountAmount,
+        serviceChargeAmount,
+        taxAmount,
+        total,
+      });
+      invoice = result.invoice;
+    } catch (e: unknown) {
+      if (e instanceof InsufficientStockError) {
+        return sendError(res, e.message, 409, { code: e.code, shortages: e.shortages });
+      }
+      if (e instanceof Error && e.message.includes("MongoDB transactions require")) {
+        return sendError(res, e.message, 503);
+      }
+      if (e instanceof Error && e.message === "ORDER_NOT_FOUND") {
+        return sendError(res, "Order not found", 404);
+      }
+      if (e instanceof Error && e.message === "ORDER_ALREADY_BILLED") {
+        return sendError(res, "Order already billed", 400);
+      }
+      throw e;
+    }
 
     if (order.customer) {
       await Customer.findByIdAndUpdate(order.customer, {

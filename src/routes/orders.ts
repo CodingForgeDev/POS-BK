@@ -1,4 +1,5 @@
 import { Router, Response } from "express";
+import mongoose from "mongoose";
 import { authenticate, AuthenticatedRequest } from "../middleware/auth";
 import { connectDB } from "../lib/mongodb";
 import { sendSuccess, sendError, generateOrderNumber } from "../lib/utils";
@@ -6,6 +7,8 @@ import Order from "../models/Order";
 import { getGstRateForMethod } from "../lib/gst";
 import { computeOrderFinancials } from "../lib/orderAmounts";
 import { getDineInServiceChargePercent } from "../lib/serviceCharge";
+import { reserveInventoryForOrder, releaseReservationForOrder } from "../lib/inventoryReservations";
+import { InsufficientStockError } from "../lib/recipeInventory";
 
 const router = Router();
 
@@ -128,7 +131,44 @@ router.patch("/:id", authenticate, async (req: AuthenticatedRequest, res: Respon
       updates.preparingStartedAt = new Date();
     }
 
-    const order = await Order.findByIdAndUpdate(req.params.id, updates, { new: true })
+    const nextStatus = updates.status as string | undefined;
+    const orderId = req.params.id;
+
+    // Reserve/release inventory around kitchen start/cancel decisions.
+    // This uses a transaction when available; on standalone MongoDB it will error similarly to billing.
+    if (nextStatus === "preparing" || nextStatus === "cancelled" || nextStatus === "rejected") {
+      const session = await mongoose.startSession();
+      try {
+        await session.withTransaction(async () => {
+          if (nextStatus === "preparing") {
+            await reserveInventoryForOrder({ orderId, userId: req.user.id, session });
+          } else {
+            await releaseReservationForOrder({ orderId, session });
+          }
+          await Order.updateOne({ _id: orderId }, updates, { session });
+        });
+      } catch (e: unknown) {
+        if (e instanceof InsufficientStockError) {
+          return sendError(res, e.message, 409, { code: e.code, shortages: e.shortages });
+        }
+        const msg = e instanceof Error ? e.message : String(e);
+        const code = (e as { code?: number })?.code;
+        if (code === 20 || /replica set/i.test(msg) || /Transaction numbers/i.test(msg)) {
+          return sendError(
+            res,
+            "MongoDB transactions require a replica set. Use MongoDB Atlas or run mongod with --replSet (see server/MONGODB-TRANSACTIONS.md).",
+            503
+          );
+        }
+        throw e;
+      } finally {
+        session.endSession();
+      }
+    } else {
+      await Order.updateOne({ _id: orderId }, updates);
+    }
+
+    const order = await Order.findById(orderId)
       .populate("customer", "name phone")
       .populate("servedBy", "name");
 

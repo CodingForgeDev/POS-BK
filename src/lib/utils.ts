@@ -12,9 +12,12 @@ export function sendSuccess(
 export function sendError(
   res: Response,
   message: string,
-  status = 500
+  status = 500,
+  data?: unknown
 ): Response {
-  return res.status(status).json({ success: false, message });
+  const body: Record<string, unknown> = { success: false, message };
+  if (data !== undefined) body.data = data;
+  return res.status(status).json(body);
 }
 
 export function generateOrderNumber(): string {

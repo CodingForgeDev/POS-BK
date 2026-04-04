@@ -15,6 +15,8 @@ const ExpenseSchema = new mongoose.Schema(
       enum: ["cash", "bank_transfer", "card"],
       default: "cash",
     },
+    /** When paymentMethod is bank_transfer, which Pakistani bank was used */
+    bankName: { type: String, default: "", trim: true },
     paidTo: { type: String, default: "" },
     notes: { type: String, default: "" },
     isRecurring: { type: Boolean, default: false },

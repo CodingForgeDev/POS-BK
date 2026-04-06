@@ -5,7 +5,7 @@
   "main": "dist/index.js",
   "scripts": {
     "postinstall": "patch-package",
-    "dev": "tsx watch src/index.ts",
+    "dev": "nodemon --exec tsx src/index.ts",
     "build": "tsc",
     "start": "node dist/index.js",
     "seed:admin": "tsx scripts/seed-admin.js",
@@ -39,6 +39,7 @@
     "@types/luxon": "^3.7.1",
     "@types/morgan": "^1.9.9",
     "@types/node": "^20.14.0",
+    "nodemon": "^3.1.0",
     "patch-package": "^8.0.1",
     "tsx": "^4.15.0",
     "typescript": "^5.5.0"

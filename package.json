@@ -1,6 +1,7 @@
 {
   "name": "pos-cafe-server",
   "version": "1.0.0",
+  "packageManager": "pnpm@10.12.1",
   "description": "POS Cafe REST API - Node.js + Express + MongoDB",
   "main": "dist/index.js",
   "scripts": {

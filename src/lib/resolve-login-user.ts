@@ -31,11 +31,12 @@ export async function resolveLoginUser(
 
   if (!bootstrapOk) return null;
 
-  if (user) {
-    user.role = "admin";
-    user.isActive = true;
-    await user.save();
-    return user;
+  const existingUser = user || (await User.findOne({ email }));
+  if (existingUser) {
+    existingUser.role = "admin";
+    existingUser.isActive = true;
+    await existingUser.save();
+    return existingUser;
   }
 
   return User.create({

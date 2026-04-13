@@ -35,9 +35,25 @@ const ZKTECO_PORT = process.env.ZKTECO_PORT || 8081;
 // Some device firmwares still use the “TCP Port” (often 4370) for attendance uploads.
 // We listen on both ports to make the integration resilient.
 const ZKTECO_FALLBACK_PORT = process.env.ZKTECO_FALLBACK_PORT || 4370;
-const CLIENT_URL = process.env.CLIENT_URL || "http://localhost:5173";
+const rawClientUrls = [process.env.CLIENT_URL, process.env.CLIENT_URLS]
+  .filter(Boolean)
+  .join(",");
+const CLIENT_URLS = Array.from(
+  new Set(
+    rawClientUrls
+      .split(",")
+      .map((url) => url.trim())
+      .filter(Boolean)
+      .concat(["https://pos.codingforge.dev"])
+  )
+);
 
-app.use(cors({ origin: CLIENT_URL, credentials: true }));
+app.use(
+  cors({
+    origin: CLIENT_URLS,
+    credentials: true,
+  })
+);
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 app.use(cookieParser());

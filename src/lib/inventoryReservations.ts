@@ -2,7 +2,8 @@ import mongoose, { ClientSession } from "mongoose";
 import Order from "../models/Order";
 import Inventory from "../models/Inventory";
 import InventoryReservation from "../models/InventoryReservation";
-import { aggregateRecipeRequirements, InsufficientStockError, ShortageDetail } from "./recipeInventory";
+import { aggregateRecipeRequirements } from "./recipeInventory";
+import { InsufficientStockError, type ShortageDetail } from "./inventoryErrors";
 
 function asShortage(inv: any | null, inventoryId: string, required: number): ShortageDetail {
   return {
@@ -101,48 +102,3 @@ export async function releaseReservationForOrder(opts: { orderId: string; sessio
   await resv.save({ session: s ?? undefined });
   return resv.toObject();
 }
-
-/**
- * Consume an active reservation during billing.
- * - Decrements currentStock by reserved quantities
- * - Decrements reservedStock by same quantities
- * - Marks reservation consumed
- */
-export async function consumeReservationForOrder(opts: {
-  orderId: string;
-  session: ClientSession;
-}) {
-  const { orderId, session } = opts;
-  const resv = await InventoryReservation.findOne({ order: orderId, status: "active" }).session(session);
-  if (!resv) return null;
-
-  const shortages: ShortageDetail[] = [];
-  for (const line of resv.lines as any[]) {
-    const qty = Number(line.quantityReserved || 0);
-    if (!(qty > 0)) continue;
-
-    const updated = await Inventory.findOneAndUpdate(
-      { _id: line.inventoryItem, isActive: true, currentStock: { $gte: qty }, reservedStock: { $gte: qty } },
-      { $inc: { currentStock: -qty, reservedStock: -qty } },
-      { session, new: true }
-    ).lean();
-
-    if (!updated) {
-      const inv = await Inventory.findById(line.inventoryItem)
-        .session(session)
-        .select("name currentStock reservedStock")
-        .lean();
-      shortages.push(asShortage(inv, String(line.inventoryItem), qty));
-    }
-  }
-
-  if (shortages.length) {
-    throw new InsufficientStockError(shortages);
-  }
-
-  resv.status = "consumed";
-  resv.consumedAt = new Date();
-  await resv.save({ session });
-  return resv.toObject();
-}
-

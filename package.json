@@ -15,7 +15,9 @@
     "seed:recipes:menu": "tsx scripts/seed-recipes-from-menu.js",
     "seed:expenses": "tsx scripts/seed-expenses.js",
     "seed:orders": "tsx scripts/seed-orders.js",
-    "seed:invoices": "tsx scripts/seed-invoices.js"
+    "seed:invoices": "tsx scripts/seed-invoices.js",
+    "backfill:stock-layers": "tsx scripts/backfill-stock-layers-from-inventory.ts",
+    "seed:suppliers-purchases": "tsx scripts/seed-suppliers-and-purchases.ts"
   },
   "dependencies": {
     "bcryptjs": "^2.4.3",

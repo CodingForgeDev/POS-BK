@@ -5,26 +5,10 @@ import Inventory from "../models/Inventory";
 import Invoice from "../models/Invoice";
 import InventoryConsumption from "../models/InventoryConsumption";
 import InventoryReservation from "../models/InventoryReservation";
+import { InsufficientStockError } from "./inventoryErrors";
+import { deductInventoryFifo, type FifoAllocation } from "./inventoryFifo";
 
-export const INSUFFICIENT_STOCK = "INSUFFICIENT_STOCK";
-
-export type ShortageDetail = {
-  inventoryId: string;
-  name: string;
-  required: number;
-  available: number;
-};
-
-export class InsufficientStockError extends Error {
-  readonly code = INSUFFICIENT_STOCK;
-  readonly shortages: ShortageDetail[];
-
-  constructor(shortages: ShortageDetail[]) {
-    super("Insufficient stock for one or more ingredients");
-    this.shortages = shortages;
-    this.name = "InsufficientStockError";
-  }
-}
+export { INSUFFICIENT_STOCK, InsufficientStockError, type ShortageDetail } from "./inventoryErrors";
 
 export type OrderItemLike = { product: mongoose.Types.ObjectId; quantity: number };
 
@@ -112,76 +96,50 @@ async function runBillingInSession(s: ClientSession, input: BillingRecipeInput) 
   if (order.status === "completed") throw new Error("ORDER_ALREADY_BILLED");
 
   const requirements = await aggregateRecipeRequirements(order.items as any[], s);
-  const linesForLedger: { inventoryItem: mongoose.Types.ObjectId; quantityConsumed: number }[] = [];
+  const linesForLedger: {
+    inventoryItem: mongoose.Types.ObjectId;
+    quantityConsumed: number;
+    fifoAllocations: FifoAllocation[];
+  }[] = [];
 
   // Prefer consuming an active kitchen reservation (reserve on preparing, consume on billing).
   const activeReservation = await InventoryReservation.findOne({ order: orderId, status: "active" }).session(s);
 
   if (activeReservation) {
-    const shortages: ShortageDetail[] = [];
     for (const line of (activeReservation.lines as any[]) || []) {
       const qty = Number(line.quantityReserved || 0);
       if (!(qty > 0)) continue;
 
-      const updated = await Inventory.findOneAndUpdate(
-        {
-          _id: line.inventoryItem,
-          isActive: true,
-          currentStock: { $gte: qty },
-          reservedStock: { $gte: qty },
-        },
-        { $inc: { currentStock: -qty, reservedStock: -qty } },
-        { session: s, new: true }
-      ).lean();
-
-      if (!updated) {
-        const current = await Inventory.findById(line.inventoryItem)
-          .session(s)
-          .select("name currentStock")
-          .lean();
-        shortages.push({
-          inventoryId: String(line.inventoryItem),
-          name: (current as { name?: string } | null)?.name || "Unknown",
-          required: qty,
-          available: (current as { currentStock?: number } | null)?.currentStock ?? 0,
-        });
-        continue;
-      }
+      const { allocations } = await deductInventoryFifo({
+        inventoryItemId: String(line.inventoryItem),
+        quantity: qty,
+        session: s,
+        releaseReserved: qty,
+      });
 
       linesForLedger.push({
         inventoryItem: new mongoose.Types.ObjectId(String(line.inventoryItem)),
         quantityConsumed: qty,
+        fifoAllocations: allocations,
       });
     }
-
-    if (shortages.length) throw new InsufficientStockError(shortages);
 
     activeReservation.status = "consumed";
     (activeReservation as any).consumedAt = new Date();
     await activeReservation.save({ session: s });
   } else {
-    // Backwards compatible path (no reservation): deduct directly at billing time.
     for (const [invId, qty] of requirements) {
-      const updated = await Inventory.findOneAndUpdate(
-        { _id: invId, isActive: true, currentStock: { $gte: qty } },
-        { $inc: { currentStock: -qty } },
-        { session: s, new: true }
-      ).lean();
+      const { allocations } = await deductInventoryFifo({
+        inventoryItemId: invId,
+        quantity: qty,
+        session: s,
+        releaseReserved: 0,
+      });
 
-      if (!updated) {
-        const current = await Inventory.findById(invId).session(s).select("name currentStock").lean();
-        throw new InsufficientStockError([
-          {
-            inventoryId: invId,
-            name: (current as { name?: string } | null)?.name || "Unknown",
-            required: qty,
-            available: (current as { currentStock?: number } | null)?.currentStock ?? 0,
-          },
-        ]);
-      }
       linesForLedger.push({
         inventoryItem: new mongoose.Types.ObjectId(invId),
         quantityConsumed: qty,
+        fifoAllocations: allocations,
       });
     }
   }

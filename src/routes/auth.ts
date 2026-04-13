@@ -1,6 +1,6 @@
 import { Router, Request, Response } from "express";
-import User from "../models/User";
 import { connectDB } from "../lib/mongodb";
+import { resolveLoginUser } from "../lib/resolve-login-user";
 import { signToken } from "../lib/jwt";
 import { sendSuccess, sendError } from "../lib/utils";
 import { authenticate } from "../middleware/auth";
@@ -16,13 +16,8 @@ router.post("/login", async (req: Request, res: Response) => {
       return sendError(res, "Email and password are required", 400);
     }
 
-    const user = await User.findOne({ email, isActive: true });
+    const user = await resolveLoginUser(email, password);
     if (!user) {
-      return sendError(res, "Invalid email or password", 401);
-    }
-
-    const isMatch = await user.comparePassword(password);
-    if (!isMatch) {
       return sendError(res, "Invalid email or password", 401);
     }
 

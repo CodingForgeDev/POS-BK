@@ -1,8 +1,13 @@
 import { Router, Response } from "express";
+import mongoose from "mongoose";
 import { authenticate, AuthenticatedRequest } from "../middleware/auth";
 import { connectDB } from "../lib/mongodb";
 import { sendSuccess, sendError } from "../lib/utils";
 import Inventory from "../models/Inventory";
+import StockLayer from "../models/StockLayer";
+import { postAdjustmentLayerInSession } from "../lib/purchasePosting";
+import { deductInventoryFifo } from "../lib/inventoryFifo";
+import { InsufficientStockError } from "../lib/inventoryErrors";
 
 const router = Router();
 
@@ -42,22 +47,90 @@ router.post("/", authenticate, async (req: AuthenticatedRequest, res: Response) 
 router.patch("/adjust", authenticate, async (req: AuthenticatedRequest, res: Response) => {
   try {
     await connectDB();
-    const { id, adjustment } = req.body;
+    if (!["admin", "manager"].includes(req.user.role)) {
+      return sendError(res, "Unauthorized", 403);
+    }
 
-    const item = await Inventory.findByIdAndUpdate(
-      id,
-      {
-        $inc: { currentStock: adjustment },
-        lastRestockedAt: adjustment > 0 ? new Date() : undefined,
-        lastRestockedBy: adjustment > 0 ? req.user.id : undefined,
-      },
-      { new: true }
-    );
+    const { id, adjustment, unitCost } = req.body as { id?: string; adjustment?: number; unitCost?: number };
+    const adj = Number(adjustment);
+    if (!id || Number.isNaN(adj) || adj === 0) {
+      return sendError(res, "Valid id and non-zero adjustment are required", 400);
+    }
 
+    const session = await mongoose.startSession();
+    try {
+      await session.withTransaction(async () => {
+        if (adj > 0) {
+          const inv = await Inventory.findOne({ _id: id, isActive: true }).session(session);
+          if (!inv) throw new Error("NOT_FOUND");
+          const cost =
+            unitCost != null && !Number.isNaN(Number(unitCost)) ? Number(unitCost) : Number(inv.costPerUnit) || 0;
+          await postAdjustmentLayerInSession(session, {
+            inventoryItemId: id,
+            quantity: adj,
+            unitCost: cost,
+            userId: req.user.id,
+          });
+        } else {
+          const qty = -adj;
+          await deductInventoryFifo({
+            inventoryItemId: id,
+            quantity: qty,
+            session,
+            releaseReserved: 0,
+          });
+        }
+      });
+    } catch (e: unknown) {
+      if (e instanceof InsufficientStockError) {
+        return sendError(res, e.message, 409, { code: e.code, shortages: e.shortages });
+      }
+      if (e instanceof Error && e.message === "NOT_FOUND") {
+        return sendError(res, "Inventory item not found", 404);
+      }
+      if (e instanceof Error && e.message === "INVENTORY_NOT_FOUND") {
+        return sendError(res, "Inventory item not found", 404);
+      }
+      const msg = e instanceof Error ? e.message : String(e);
+      const code = (e as { code?: number })?.code;
+      if (code === 20 || /replica set/i.test(msg) || /Transaction numbers/i.test(msg)) {
+        return sendError(
+          res,
+          "MongoDB transactions require a replica set. Use MongoDB Atlas or run mongod with --replSet (see server/MONGODB-TRANSACTIONS.md).",
+          503
+        );
+      }
+      console.error("Adjust stock error:", e);
+      return sendError(res, "Failed to adjust stock", 500);
+    } finally {
+      session.endSession();
+    }
+
+    const item = await Inventory.findById(id).populate("lastRestockedBy", "name").lean();
     if (!item) return sendError(res, "Inventory item not found", 404);
-    return sendSuccess(res, item, `Stock adjusted by ${adjustment}`);
+    return sendSuccess(res, item, `Stock adjusted by ${adj}`);
   } catch (error) {
+    console.error("Adjust stock outer error:", error);
     return sendError(res, "Failed to adjust stock", 500);
+  }
+});
+
+router.get("/:id/layers", authenticate, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    await connectDB();
+    const inv = await Inventory.findOne({ _id: req.params.id, isActive: true }).lean();
+    if (!inv) return sendError(res, "Inventory item not found", 404);
+
+    const layers = await StockLayer.find({ inventoryItem: req.params.id })
+      .sort({ receivedAt: 1, _id: 1 })
+      .populate("purchase", "referenceNumber receivedAt totalAmount")
+      .populate("supplier", "name")
+      .lean();
+
+    return sendSuccess(res, layers);
+  } catch (error) {
+    console.error("List stock layers error:", error);
+    return sendError(res, "Failed to fetch stock layers", 500);
   }
 });
 

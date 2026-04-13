@@ -1,11 +1,26 @@
 import mongoose from "mongoose";
 
+const OrderItemModifierSchema = new mongoose.Schema(
+  {
+    groupName: { type: String, required: true, trim: true },
+    optionName: { type: String, required: true, trim: true },
+    action: {
+      type: String,
+      enum: ["add", "no", "extra", "side", "substitute"],
+      default: "add",
+    },
+    priceDelta: { type: Number, default: 0 },
+  },
+  { _id: false }
+);
+
 const OrderItemSchema = new mongoose.Schema(
   {
     product: { type: mongoose.Schema.Types.ObjectId, ref: "Product", required: true },
     name: { type: String, required: true },
     price: { type: Number, required: true },
     quantity: { type: Number, required: true, min: 1 },
+    modifiers: { type: [OrderItemModifierSchema], default: [] },
     notes: { type: String, default: "" },
     subtotal: { type: Number, required: true },
     /** When true, item was added to an existing ready order — kitchen should prepare only these. */

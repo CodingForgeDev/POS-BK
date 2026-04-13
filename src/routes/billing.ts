@@ -44,9 +44,13 @@ router.get("/", authenticate, async (req: AuthenticatedRequest, res: Response) =
 
     const total = await Invoice.countDocuments(query);
     const invoices = await Invoice.find(query)
-      .populate("order", "orderNumber type")
-      .populate("customer", "name phone")
       .populate("issuedBy", "name")
+      .populate({
+        path: "order",
+        select: "orderNumber type tableNumber",
+        populate: { path: "servedBy", select: "name" },
+      })
+      .populate("customer", "name phone")
       .sort({ createdAt: -1 })
       .skip((pageNum - 1) * limitNum)
       .limit(limitNum)
@@ -114,7 +118,12 @@ router.post("/", authenticate, async (req: AuthenticatedRequest, res: Response) 
     }
 
     const populated = await Invoice.findById(invoice._id)
-      .populate("order", "orderNumber type")
+      .populate("issuedBy", "name")
+      .populate({
+        path: "order",
+        select: "orderNumber type tableNumber",
+        populate: { path: "servedBy", select: "name" },
+      })
       .populate("customer", "name phone");
 
     return sendSuccess(res, populated, "Invoice created successfully", 201);

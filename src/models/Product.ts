@@ -9,6 +9,24 @@ const RecipeLineSchema = new mongoose.Schema(
   { _id: false }
 );
 
+const ProductModifierOptionSchema = new mongoose.Schema(
+  {
+    name: { type: String, required: true, trim: true },
+    priceDelta: { type: Number, default: 0 },
+  },
+  { _id: false }
+);
+
+const ProductModifierGroupSchema = new mongoose.Schema(
+  {
+    name: { type: String, required: true, trim: true },
+    required: { type: Boolean, default: false },
+    multiSelect: { type: Boolean, default: false },
+    options: { type: [ProductModifierOptionSchema], default: [] },
+  },
+  { _id: false }
+);
+
 const ProductSchema = new mongoose.Schema(
   {
     name: { type: String, required: true, trim: true },
@@ -26,6 +44,7 @@ const ProductSchema = new mongoose.Schema(
     allergens: [{ type: String }],
     sortOrder: { type: Number, default: 0 },
     recipeLines: { type: [RecipeLineSchema], default: [] },
+    modifierGroups: { type: [ProductModifierGroupSchema], default: [] },
   },
   {
     timestamps: true,

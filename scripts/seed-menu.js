@@ -49,6 +49,19 @@ const ProductSchema = new mongoose.Schema(
     preparationTime: { type: Number, default: 10 },
     allergens: [{ type: String }],
     sortOrder: { type: Number, default: 0 },
+    modifierGroups: [
+      {
+        name: { type: String, required: true, trim: true },
+        required: { type: Boolean, default: false },
+        multiSelect: { type: Boolean, default: false },
+        options: [
+          {
+            name: { type: String, required: true, trim: true },
+            priceDelta: { type: Number, default: 0 },
+          },
+        ],
+      },
+    ],
   },
   { timestamps: true }
 );
@@ -76,6 +89,167 @@ const CATEGORIES = [
   "Coffee & Tea",
 ];
 
+function cloneGroups(groups) {
+  return groups.map((group) => ({
+    name: group.name,
+    required: Boolean(group.required),
+    multiSelect: Boolean(group.multiSelect),
+    options: group.options.map((option) => ({
+      name: option.name,
+      priceDelta: Number(option.priceDelta || 0),
+    })),
+  }));
+}
+
+function normalizeGroups(groups) {
+  if (!Array.isArray(groups)) return [];
+  const normalized = [];
+  for (const group of groups) {
+    const groupName = String(group?.name || "").trim();
+    if (!groupName) continue;
+    const options = Array.isArray(group.options)
+      ? group.options
+          .map((option) => ({
+            name: String(option?.name || "").trim(),
+            priceDelta: Number(option?.priceDelta || 0),
+          }))
+          .filter((option) => option.name)
+      : [];
+    if (!options.length) continue;
+    normalized.push({
+      name: groupName,
+      required: Boolean(group.required),
+      multiSelect: Boolean(group.multiSelect),
+      options,
+    });
+  }
+  return normalized;
+}
+
+const BURGER_AND_WRAP_PRESETS = [
+  {
+    name: "Sauce",
+    required: false,
+    multiSelect: true,
+    options: [
+      { name: "Extra Mayo", priceDelta: 30 },
+      { name: "Extra BBQ Sauce", priceDelta: 40 },
+      { name: "Extra Spicy Sauce", priceDelta: 30 },
+      { name: "Sauce on Side", priceDelta: 20 },
+      { name: "No Sauce", priceDelta: 0 },
+    ],
+  },
+  {
+    name: "Add-ons",
+    required: false,
+    multiSelect: true,
+    options: [
+      { name: "Extra Cheese", priceDelta: 120 },
+      { name: "Extra Jalapenos", priceDelta: 50 },
+      { name: "Extra Patty", priceDelta: 280 },
+    ],
+  },
+];
+
+const PIZZA_PRESETS = [
+  {
+    name: "Crust Preference",
+    required: false,
+    multiSelect: false,
+    options: [
+      { name: "Regular Crust", priceDelta: 0 },
+      { name: "Thin Crust", priceDelta: 0 },
+      { name: "Cheese Burst", priceDelta: 250 },
+    ],
+  },
+  {
+    name: "Cheese & Toppings",
+    required: false,
+    multiSelect: true,
+    options: [
+      { name: "Extra Cheese", priceDelta: 180 },
+      { name: "Extra Olives", priceDelta: 90 },
+      { name: "Extra Jalapenos", priceDelta: 80 },
+      { name: "No Onion", priceDelta: 0 },
+    ],
+  },
+];
+
+const CHICKEN_PRESETS = [
+  {
+    name: "Flavor / Toss",
+    required: false,
+    multiSelect: false,
+    options: [
+      { name: "BBQ Toss", priceDelta: 70 },
+      { name: "Hot Toss", priceDelta: 70 },
+      { name: "Garlic Butter Toss", priceDelta: 90 },
+      { name: "Plain", priceDelta: 0 },
+    ],
+  },
+  {
+    name: "Dips",
+    required: false,
+    multiSelect: true,
+    options: [
+      { name: "Garlic Mayo Dip", priceDelta: 80 },
+      { name: "Spicy Mayo Dip", priceDelta: 80 },
+      { name: "Cheese Sauce Dip", priceDelta: 120 },
+    ],
+  },
+];
+
+const SIDE_PRESETS = [
+  {
+    name: "Dips",
+    required: false,
+    multiSelect: true,
+    options: [
+      { name: "Garlic Mayo Dip", priceDelta: 80 },
+      { name: "Spicy Mayo Dip", priceDelta: 80 },
+      { name: "BBQ Dip", priceDelta: 80 },
+      { name: "Cheese Sauce Dip", priceDelta: 120 },
+    ],
+  },
+];
+
+function inferModifierGroups(item) {
+  if (Array.isArray(item.modifierGroups) && item.modifierGroups.length > 0) {
+    return normalizeGroups(item.modifierGroups);
+  }
+
+  const category = String(item.category || "");
+  const lowerName = String(item.name || "").toLowerCase();
+
+  if (["Burgers", "Chicken Burgers", "Sandwiches & Subs", "Wraps"].includes(category)) {
+    return cloneGroups(BURGER_AND_WRAP_PRESETS);
+  }
+  if (category === "Pizza") {
+    return cloneGroups(PIZZA_PRESETS);
+  }
+  if (["Wings", "Fried Chicken"].includes(category)) {
+    return cloneGroups(CHICKEN_PRESETS);
+  }
+  if (category === "Sides") {
+    return cloneGroups(SIDE_PRESETS);
+  }
+  if (category === "Beverages" && lowerName.includes("fresh lime")) {
+    return [
+      {
+        name: "Taste",
+        required: false,
+        multiSelect: false,
+        options: [
+          { name: "Sweet", priceDelta: 0 },
+          { name: "Salt", priceDelta: 0 },
+          { name: "Sweet & Salt", priceDelta: 0 },
+        ],
+      },
+    ];
+  }
+  return [];
+}
+
 // ─── Seed ───────────────────────────────────────────────────────────────────
 
 async function seedMenu() {
@@ -99,6 +273,7 @@ async function seedMenu() {
     // 2) Seed products
     let created = 0;
     let updated = 0;
+    let productsWithModifiers = 0;
 
     for (const item of MENU) {
       const categoryId = categoryMap.get(item.category);
@@ -116,7 +291,9 @@ async function seedMenu() {
         description: item.description ?? "",
         isActive: true,
         isAvailable: true,
+        modifierGroups: inferModifierGroups(item),
       };
+      if (productData.modifierGroups.length > 0) productsWithModifiers++;
 
       const existing = await Product.findOne(filter);
       if (existing) {
@@ -132,6 +309,7 @@ async function seedMenu() {
     console.log(`✅ Products Created : ${created}`);
     console.log(`♻️  Products Updated : ${updated}`);
     console.log(`📦 Total Menu Items : ${MENU.length}`);
+    console.log(`🧩 With Modifiers    : ${productsWithModifiers}`);
     console.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n");
 
     process.exit(0);

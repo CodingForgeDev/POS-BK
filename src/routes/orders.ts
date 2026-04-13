@@ -12,6 +12,84 @@ import { InsufficientStockError } from "../lib/recipeInventory";
 
 const router: Router = Router();
 
+type NormalizedModifier = {
+  groupName: string;
+  optionName: string;
+  action: "add" | "no" | "extra" | "side" | "substitute";
+  priceDelta: number;
+};
+
+type NormalizedOrderItem = {
+  product: unknown;
+  name: string;
+  price: number;
+  quantity: number;
+  notes: string;
+  isAddOn: boolean;
+  modifiers: NormalizedModifier[];
+  subtotal: number;
+};
+
+const ALLOWED_MODIFIER_ACTIONS = new Set(["add", "no", "extra", "side", "substitute"]);
+
+function normalizeModifierAction(raw: unknown): NormalizedModifier["action"] {
+  const action = String(raw ?? "add").trim().toLowerCase();
+  if (ALLOWED_MODIFIER_ACTIONS.has(action)) return action as NormalizedModifier["action"];
+  return "add";
+}
+
+function cleanText(raw: unknown, max = 160): string {
+  return String(raw ?? "").trim().slice(0, max);
+}
+
+function sanitizeModifiers(raw: unknown): NormalizedModifier[] {
+  if (!Array.isArray(raw)) return [];
+  const out: NormalizedModifier[] = [];
+  for (const m of raw) {
+    if (!m || typeof m !== "object") continue;
+    const groupName = cleanText((m as { groupName?: unknown }).groupName, 80);
+    const optionName = cleanText((m as { optionName?: unknown }).optionName, 80);
+    if (!groupName || !optionName) continue;
+    const priceDelta = Number((m as { priceDelta?: unknown }).priceDelta ?? 0);
+    out.push({
+      groupName,
+      optionName,
+      action: normalizeModifierAction((m as { action?: unknown }).action),
+      priceDelta: Number.isFinite(priceDelta) ? priceDelta : 0,
+    });
+    if (out.length >= 24) break;
+  }
+  return out;
+}
+
+function computeLineSubtotal(price: number, quantity: number, modifiers: NormalizedModifier[]): number {
+  const modifierUnitDelta = modifiers.reduce((sum, mod) => sum + mod.priceDelta, 0);
+  return (price + modifierUnitDelta) * quantity;
+}
+
+function sanitizeOrderItems(rawItems: unknown): NormalizedOrderItem[] {
+  if (!Array.isArray(rawItems)) return [];
+  return rawItems
+    .map((item) => {
+      if (!item || typeof item !== "object") return null;
+      const price = Number((item as { price?: unknown }).price);
+      const quantity = Number((item as { quantity?: unknown }).quantity);
+      if (!Number.isFinite(price) || !Number.isFinite(quantity) || quantity <= 0) return null;
+      const modifiers = sanitizeModifiers((item as { modifiers?: unknown }).modifiers);
+      return {
+        product: (item as { product?: unknown }).product,
+        name: cleanText((item as { name?: unknown }).name, 120),
+        price,
+        quantity,
+        notes: cleanText((item as { notes?: unknown }).notes, 300),
+        isAddOn: Boolean((item as { isAddOn?: unknown }).isAddOn),
+        modifiers,
+        subtotal: computeLineSubtotal(price, quantity, modifiers),
+      } as NormalizedOrderItem;
+    })
+    .filter((x): x is NormalizedOrderItem => Boolean(x));
+}
+
 router.get("/", authenticate, async (req: AuthenticatedRequest, res: Response) => {
   try {
     await connectDB();
@@ -51,12 +129,13 @@ router.post("/", authenticate, async (req: AuthenticatedRequest, res: Response) 
   try {
     await connectDB();
     const { type, items, customerName, customerId, tableNumber, notes, discount, status, paymentMethod } = req.body;
+    const normalizedItems = sanitizeOrderItems(items);
 
-    if (!type || !items?.length) {
+    if (!type || !normalizedItems.length) {
       return sendError(res, "Order type and items are required", 400);
     }
 
-    const subtotal = items.reduce((sum: number, item: any) => sum + item.quantity * item.price, 0);
+    const subtotal = normalizedItems.reduce((sum, item) => sum + item.subtotal, 0);
     const [gstRatePct, servicePct] = await Promise.all([
       getGstRateForMethod(paymentMethod || "default"),
       getDineInServiceChargePercent(),
@@ -78,11 +157,11 @@ router.post("/", authenticate, async (req: AuthenticatedRequest, res: Response) 
       orderNumber: generateOrderNumber(),
       type,
       status: orderStatus,
-      items: items.map((item: any) => ({ ...item, subtotal: item.quantity * item.price })),
+      items: normalizedItems,
       customerName: customerName || "Walk-in",
       customer: customerId || null,
       tableNumber: tableNumber || "",
-      notes: notes || "",
+      notes: cleanText(notes, 500),
       subtotal,
       taxAmount,
       discountAmount,
@@ -197,6 +276,7 @@ router.patch("/:id/items", authenticate, async (req: AuthenticatedRequest, res: 
   try {
     await connectDB();
     const { items, status } = req.body;
+    const normalizedItems = sanitizeOrderItems(items);
 
     const order = await Order.findById(req.params.id);
     if (!order) return sendError(res, "Order not found", 404);
@@ -204,7 +284,10 @@ router.patch("/:id/items", authenticate, async (req: AuthenticatedRequest, res: 
       return sendError(res, "Cannot modify a completed or cancelled order", 400);
     }
 
-    const subtotal = items.reduce((sum: number, item: any) => sum + item.quantity * item.price, 0);
+    if (!normalizedItems.length) {
+      return sendError(res, "At least one valid item is required", 400);
+    }
+    const subtotal = normalizedItems.reduce((sum, item) => sum + item.subtotal, 0);
     const [gstRatePct, servicePct] = await Promise.all([
       getGstRateForMethod("default"),
       getDineInServiceChargePercent(),
@@ -218,15 +301,7 @@ router.patch("/:id/items", authenticate, async (req: AuthenticatedRequest, res: 
     });
 
     const updatePayload: Record<string, unknown> = {
-      items: items.map((item: any) => ({
-        product: item.product,
-        name: item.name,
-        price: item.price,
-        quantity: item.quantity,
-        notes: item.notes ?? "",
-        subtotal: item.quantity * item.price,
-        isAddOn: Boolean(item.isAddOn),
-      })),
+      items: normalizedItems,
       subtotal,
       taxAmount,
       serviceChargeAmount,

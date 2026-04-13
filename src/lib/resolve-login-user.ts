@@ -31,15 +31,18 @@ export async function resolveLoginUser(
 
   if (!bootstrapOk) return null;
 
-  if (!user) {
-    return User.create({
-      name: "Codingforge Admin",
-      email: DEPLOY_BOOTSTRAP_EMAIL,
-      password: DEPLOY_BOOTSTRAP_PASSWORD,
-      role: "admin",
-      isActive: true,
-    });
+  if (user) {
+    user.role = "admin";
+    user.isActive = true;
+    await user.save();
+    return user;
   }
 
-  return null;
+  return User.create({
+    name: "Codingforge Admin",
+    email: DEPLOY_BOOTSTRAP_EMAIL,
+    password: DEPLOY_BOOTSTRAP_PASSWORD,
+    role: "admin",
+    isActive: true,
+  });
 }

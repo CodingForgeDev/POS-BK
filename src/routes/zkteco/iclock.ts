@@ -8,7 +8,7 @@ import {
   splitAdmsBodyIntoLines,
 } from "../../integrations/zkteco/admsAttendanceReceiver";
 
-const router = Router();
+const router: Router = Router();
 
 // ZKTeco ADMS sends non-JSON bodies (tab/newline separated strings) to /iclock/cdata.
 // Parse raw text within this router only to avoid impacting the rest of your API.

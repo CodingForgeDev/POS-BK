@@ -22,7 +22,7 @@ function invoiceTotalsFromOrder(order: any, gstRatePct: number) {
   return { discountAmount, serviceChargeAmount, taxAmount, total };
 }
 
-const router = Router();
+const router: Router = Router();
 
 router.get("/", authenticate, async (req: AuthenticatedRequest, res: Response) => {
   try {

@@ -5,7 +5,7 @@ import { signToken } from "../lib/jwt";
 import { sendSuccess, sendError } from "../lib/utils";
 import { authenticate } from "../middleware/auth";
 
-const router = Router();
+const router: Router = Router();
 
 router.post("/login", async (req: Request, res: Response) => {
   try {

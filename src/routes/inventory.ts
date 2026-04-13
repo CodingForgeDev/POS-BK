@@ -9,7 +9,7 @@ import { postAdjustmentLayerInSession } from "../lib/purchasePosting";
 import { deductInventoryFifo } from "../lib/inventoryFifo";
 import { InsufficientStockError } from "../lib/inventoryErrors";
 
-const router = Router();
+const router: Router = Router();
 
 router.get("/", authenticate, async (req: AuthenticatedRequest, res: Response) => {
   try {

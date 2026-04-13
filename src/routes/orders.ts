@@ -10,7 +10,7 @@ import { getDineInServiceChargePercent } from "../lib/serviceCharge";
 import { reserveInventoryForOrder, releaseReservationForOrder } from "../lib/inventoryReservations";
 import { InsufficientStockError } from "../lib/recipeInventory";
 
-const router = Router();
+const router: Router = Router();
 
 router.get("/", authenticate, async (req: AuthenticatedRequest, res: Response) => {
   try {

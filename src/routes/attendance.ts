@@ -12,7 +12,7 @@ import {
 } from "../lib/attendanceHelpers";
 import { endOfBusinessDay, startOfBusinessMonth, endOfBusinessMonth } from "../lib/appTimezone";
 
-const router = Router();
+const router: Router = Router();
 
 router.get("/", authenticate, async (req: AuthenticatedRequest, res: Response) => {
   try {

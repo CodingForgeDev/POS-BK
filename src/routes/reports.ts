@@ -6,7 +6,7 @@ import Invoice from "../models/Invoice";
 import Order from "../models/Order";
 import Expense from "../models/Expense";
 
-const router = Router();
+const router: Router = Router();
 
 router.get("/", authenticate, async (req: AuthenticatedRequest, res: Response) => {
   try {

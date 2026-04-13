@@ -5,7 +5,7 @@ import { sendSuccess, sendError } from "../lib/utils";
 import { pickProductPayload } from "../lib/productPayload";
 import Product from "../models/Product";
 
-const router = Router();
+const router: Router = Router();
 
 router.get("/", authenticate, async (req: AuthenticatedRequest, res: Response) => {
   try {

@@ -4,7 +4,7 @@ import { connectDB } from "../lib/mongodb";
 import { sendSuccess, sendError } from "../lib/utils";
 import Customer from "../models/Customer";
 
-const router = Router();
+const router: Router = Router();
 
 router.get("/", authenticate, async (req: AuthenticatedRequest, res: Response) => {
   try {

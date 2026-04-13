@@ -4,7 +4,7 @@ import { connectDB } from "../lib/mongodb";
 import { sendSuccess, sendError } from "../lib/utils";
 import Discount from "../models/Discount";
 
-const router = Router();
+const router: Router = Router();
 
 router.get("/", authenticate, async (_req: AuthenticatedRequest, res: Response) => {
   try {

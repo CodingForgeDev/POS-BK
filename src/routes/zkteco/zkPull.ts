@@ -5,7 +5,7 @@ import { getZkPullConfig, isZkPullDeviceConfigured } from "../../integrations/zk
 import { zkTestDeviceConnection, fetchZkDeviceUsers } from "../../integrations/zkteco/zkClient";
 import { runZkPullSync, getZkPullSyncStatus } from "../../integrations/zkteco/zkPullService";
 
-const router = Router();
+const router: Router = Router();
 
 router.get(
   "/status",

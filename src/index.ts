@@ -27,7 +27,7 @@ import zktecoIclockRoutes from "./routes/zkteco/iclock";
 import zkPullRoutes from "./routes/zkteco/zkPull";
 import { initZkPull } from "./integrations/zkteco/zkPullScheduler";
 
-const app = express();
+const app: express.Application = express();
 // Avoid 304 Not Modified responses for device calls (some ZKTeco firmwares expect the body).
 app.set("etag", false);
 const PORT = process.env.PORT || 5000;

@@ -9,7 +9,7 @@ import Expense from "../models/Expense";
 import Attendance from "../models/Attendance";
 import Customer from "../models/Customer";
 
-const router = Router();
+const router: Router = Router();
 
 router.get("/", authenticate, async (req: AuthenticatedRequest, res: Response) => {
   try {

@@ -6,7 +6,7 @@ import { sendSuccess, sendError } from "../lib/utils";
 import Purchase from "../models/Purchase";
 import { postPurchaseInSession, type PostPurchaseLineInput } from "../lib/purchasePosting";
 
-const router = Router();
+const router: Router = Router();
 
 router.get("/", authenticate, async (req: AuthenticatedRequest, res: Response) => {
   try {

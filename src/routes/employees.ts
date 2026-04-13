@@ -6,7 +6,7 @@ import { sendSuccess, sendError } from "../lib/utils";
 import Employee from "../models/Employee";
 import User from "../models/User";
 
-const router = Router();
+const router: Router = Router();
 
 const SALARY_TYPES = ["hourly", "weekly", "monthly"] as const;
 const USER_ROLES = ["admin", "cashier", "kitchen", "manager"] as const;

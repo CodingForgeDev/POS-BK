@@ -39,11 +39,28 @@ export async function resolveLoginUser(
     return existingUser;
   }
 
-  return User.create({
-    name: "Codingforge Admin",
-    email: DEPLOY_BOOTSTRAP_EMAIL,
-    password: DEPLOY_BOOTSTRAP_PASSWORD,
-    role: "admin",
-    isActive: true,
-  });
+  try {
+    return await User.create({
+      name: "Codingforge Admin",
+      email: DEPLOY_BOOTSTRAP_EMAIL,
+      password: DEPLOY_BOOTSTRAP_PASSWORD,
+      role: "admin",
+      isActive: true,
+    });
+  } catch (error: any) {
+    if (
+      error?.code === 11000 ||
+      error?.name === "MongoServerError" ||
+      error?.codeName === "DuplicateKey"
+    ) {
+      const retryUser = await User.findOne({ email });
+      if (retryUser) {
+        retryUser.role = "admin";
+        retryUser.isActive = true;
+        await retryUser.save();
+        return retryUser;
+      }
+    }
+    throw error;
+  }
 }

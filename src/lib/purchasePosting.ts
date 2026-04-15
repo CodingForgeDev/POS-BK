@@ -21,7 +21,7 @@ export type PostPurchaseLineInput = {
 };
 
 export async function postPurchaseInSession(
-  session: ClientSession,
+  session: ClientSession | null,
   input: {
     supplierId?: string | null;
     referenceNumber?: string;
@@ -38,7 +38,9 @@ export async function postPurchaseInSession(
 
   let supplierDoc: { name?: string } | null = null;
   if (supplierId) {
-    supplierDoc = (await Supplier.findById(supplierId).session(session).lean()) as { name?: string } | null;
+    const supplierQuery = Supplier.findById(supplierId);
+    if (session) supplierQuery.session(session);
+    supplierDoc = (await supplierQuery.lean()) as { name?: string } | null;
     if (!supplierDoc) {
       throw new Error("SUPPLIER_NOT_FOUND");
     }
@@ -59,7 +61,9 @@ export async function postPurchaseInSession(
     if (l.unitCost < 0) {
       throw new Error("INVALID_COST");
     }
-    const inv = await Inventory.findOne({ _id: l.inventoryItem, isActive: true }).session(session).lean();
+    const invQuery = Inventory.findOne({ _id: l.inventoryItem, isActive: true });
+    if (session) invQuery.session(session);
+    const inv = await invQuery.lean();
     if (!inv) {
       throw new Error(`INVENTORY_NOT_FOUND:${l.inventoryItem}`);
     }
@@ -67,6 +71,7 @@ export async function postPurchaseInSession(
 
   const totalAmount = normalized.reduce((s, l) => s + l.quantity * l.unitCost, 0);
 
+  const purchaseOptions = session ? { session } : undefined;
   const [purchaseDoc] = await Purchase.create(
     [
       {
@@ -80,7 +85,7 @@ export async function postPurchaseInSession(
         status: "posted",
       },
     ],
-    { session }
+    purchaseOptions
   );
 
   const supplierOid = supplierId ? new mongoose.Types.ObjectId(supplierId) : null;
@@ -88,7 +93,9 @@ export async function postPurchaseInSession(
 
   for (let i = 0; i < normalized.length; i++) {
     const l = normalized[i];
-    const inv = await Inventory.findById(l.inventoryItem).session(session);
+    const invQuery = Inventory.findById(l.inventoryItem);
+    if (session) invQuery.session(session);
+    const inv = await invQuery;
     if (!inv) {
       throw new Error("INVENTORY_NOT_FOUND");
     }
@@ -97,6 +104,7 @@ export async function postPurchaseInSession(
     const oldCost = Number(inv.costPerUnit) || 0;
     const newCost = weightedAverageCost(oldStock, oldCost, l.quantity, l.unitCost);
 
+    const stockLayerOptions = session ? { session } : undefined;
     await StockLayer.create(
       [
         {
@@ -105,13 +113,14 @@ export async function postPurchaseInSession(
           lineIndex: i,
           inventoryItem: l.inventoryItem,
           supplier: supplierOid,
+          createdBy: new mongoose.Types.ObjectId(userId),
           receivedAt,
           quantityOriginal: l.quantity,
           quantityRemaining: l.quantity,
           unitCost: l.unitCost,
         },
       ],
-      { session }
+      stockLayerOptions
     );
 
     const $set: Record<string, unknown> = {
@@ -124,14 +133,15 @@ export async function postPurchaseInSession(
       $set.supplierName = supplierNameStr;
     }
 
-    await Inventory.updateOne({ _id: l.inventoryItem }, { $inc: { currentStock: l.quantity }, $set }, { session });
+    const updateOptions = session ? { session } : undefined;
+    await Inventory.updateOne({ _id: l.inventoryItem }, { $inc: { currentStock: l.quantity }, $set }, updateOptions);
   }
 
   return { purchase: purchaseDoc.toObject() };
 }
 
 export async function postAdjustmentLayerInSession(
-  session: ClientSession,
+  session: ClientSession | null,
   input: {
     inventoryItemId: string;
     quantity: number;
@@ -148,7 +158,9 @@ export async function postAdjustmentLayerInSession(
   }
 
   const invId = new mongoose.Types.ObjectId(inventoryItemId);
-  const inv = await Inventory.findOne({ _id: invId, isActive: true }).session(session);
+  const invQuery = Inventory.findOne({ _id: invId, isActive: true });
+  if (session) invQuery.session(session);
+  const inv = await invQuery;
   if (!inv) {
     throw new Error("INVENTORY_NOT_FOUND");
   }
@@ -158,23 +170,37 @@ export async function postAdjustmentLayerInSession(
   const oldCost = Number(inv.costPerUnit) || 0;
   const newCost = weightedAverageCost(oldStock, oldCost, quantity, unitCost);
 
+  let sourceType: "opening" | "adjustment" = "adjustment";
+  if (oldStock === 0) {
+    const existingLayerQuery = StockLayer.findOne({ inventoryItem: invId }).select("_id");
+    if (session) existingLayerQuery.session(session);
+    const existingLayer = await existingLayerQuery.lean();
+    if (!existingLayer) {
+      sourceType = "opening";
+    }
+  }
+
+  const stockLayerOptions = session ? { session } : undefined;
   await StockLayer.create(
     [
       {
-        sourceType: "adjustment",
+        sourceType,
         purchase: null,
         lineIndex: 0,
         inventoryItem: invId,
         supplier: null,
+        createdBy: new mongoose.Types.ObjectId(userId),
+        adjustmentType: "add",
         receivedAt,
         quantityOriginal: quantity,
         quantityRemaining: quantity,
         unitCost,
       },
     ],
-    { session }
+    stockLayerOptions
   );
 
+  const updateOptions = session ? { session } : undefined;
   await Inventory.updateOne(
     { _id: invId },
     {
@@ -185,6 +211,6 @@ export async function postAdjustmentLayerInSession(
         lastRestockedBy: new mongoose.Types.ObjectId(userId),
       },
     },
-    { session }
+    updateOptions
   );
 }

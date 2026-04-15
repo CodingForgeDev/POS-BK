@@ -13,6 +13,8 @@ const StockLayerSchema = new mongoose.Schema(
     lineIndex: { type: Number, default: 0 },
     inventoryItem: { type: mongoose.Schema.Types.ObjectId, ref: "Inventory", required: true },
     supplier: { type: mongoose.Schema.Types.ObjectId, ref: "Supplier", default: null },
+    createdBy: { type: mongoose.Schema.Types.ObjectId, ref: "User", default: null },
+    adjustmentType: { type: String, enum: ["add", "remove"], default: null },
     receivedAt: { type: Date, required: true },
     quantityOriginal: { type: Number, required: true, min: 0 },
     quantityRemaining: { type: Number, required: true, min: 0 },

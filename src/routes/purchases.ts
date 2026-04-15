@@ -103,21 +103,40 @@ router.post("/", authenticate, async (req: AuthenticatedRequest, res: Response) 
       });
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : String(e);
-      if (msg === "SUPPLIER_NOT_FOUND") return sendError(res, "Supplier not found", 400);
-      if (msg === "NO_LINES") return sendError(res, "At least one line is required", 400);
-      if (msg === "INVALID_QUANTITY") return sendError(res, "Each line must have quantity greater than 0", 400);
-      if (msg === "INVALID_COST") return sendError(res, "Invalid unit cost", 400);
-      if (msg.startsWith("INVENTORY_NOT_FOUND")) return sendError(res, "One or more inventory items were not found", 400);
       const code = (e as { code?: number })?.code;
-      if (code === 20 || /replica set/i.test(msg) || /Transaction numbers/i.test(msg)) {
-        return sendError(
-          res,
-          "MongoDB transactions require a replica set. Use MongoDB Atlas or run mongod with --replSet (see server/MONGODB-TRANSACTIONS.md).",
-          503
-        );
+      const isTransactionUnavailable =
+        code === 20 || /replica set/i.test(msg) || /Transaction numbers/i.test(msg);
+      if (isTransactionUnavailable) {
+        console.warn("Transactions unavailable, falling back to non-transactional purchase posting.");
+        try {
+          const { purchase } = await postPurchaseInSession(null, {
+            supplierId: supplierId || null,
+            referenceNumber: referenceNumber ?? "",
+            receivedAt: received,
+            notes: notes ?? "",
+            lines,
+            userId: req.user.id,
+          });
+          purchasePayload = purchase;
+        } catch (innerError: unknown) {
+          const innerMsg = innerError instanceof Error ? innerError.message : String(innerError);
+          if (innerMsg === "SUPPLIER_NOT_FOUND") return sendError(res, "Supplier not found", 400);
+          if (innerMsg === "NO_LINES") return sendError(res, "At least one line is required", 400);
+          if (innerMsg === "INVALID_QUANTITY") return sendError(res, "Each line must have quantity greater than 0", 400);
+          if (innerMsg === "INVALID_COST") return sendError(res, "Invalid unit cost", 400);
+          if (innerMsg.startsWith("INVENTORY_NOT_FOUND")) return sendError(res, "One or more inventory items were not found", 400);
+          console.error("Post purchase fallback error:", innerError);
+          return sendError(res, "Failed to record purchase", 500);
+        }
+      } else {
+        if (msg === "SUPPLIER_NOT_FOUND") return sendError(res, "Supplier not found", 400);
+        if (msg === "NO_LINES") return sendError(res, "At least one line is required", 400);
+        if (msg === "INVALID_QUANTITY") return sendError(res, "Each line must have quantity greater than 0", 400);
+        if (msg === "INVALID_COST") return sendError(res, "Invalid unit cost", 400);
+        if (msg.startsWith("INVENTORY_NOT_FOUND")) return sendError(res, "One or more inventory items were not found", 400);
+        console.error("Post purchase error:", e);
+        return sendError(res, "Failed to record purchase", 500);
       }
-      console.error("Post purchase error:", e);
-      return sendError(res, "Failed to record purchase", 500);
     } finally {
       session.endSession();
     }

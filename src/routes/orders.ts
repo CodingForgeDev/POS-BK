@@ -31,6 +31,7 @@ type NormalizedOrderItem = {
 };
 
 const ALLOWED_MODIFIER_ACTIONS = new Set(["add", "no", "extra", "side", "substitute"]);
+const ACTIVE_ORDER_STATUSES = ["open", "accepted", "preparing", "ready"] as const;
 
 function normalizeModifierAction(raw: unknown): NormalizedModifier["action"] {
   const action = String(raw ?? "add").trim().toLowerCase();
@@ -40,6 +41,15 @@ function normalizeModifierAction(raw: unknown): NormalizedModifier["action"] {
 
 function cleanText(raw: unknown, max = 160): string {
   return String(raw ?? "").trim().slice(0, max);
+}
+
+function normalizeProduct(raw: unknown): string | null {
+  if (typeof raw === "string" && raw.trim()) return raw.trim();
+  if (raw && typeof raw === "object") {
+    const id = (raw as { _id?: unknown; id?: unknown })._id ?? (raw as { _id?: unknown; id?: unknown }).id;
+    if (typeof id === "string" && id.trim()) return id.trim();
+  }
+  return null;
 }
 
 function sanitizeModifiers(raw: unknown): NormalizedModifier[] {
@@ -72,12 +82,15 @@ function sanitizeOrderItems(rawItems: unknown): NormalizedOrderItem[] {
   return rawItems
     .map((item) => {
       if (!item || typeof item !== "object") return null;
+      const productRaw = (item as { product?: unknown }).product;
+      const product = normalizeProduct(productRaw);
+      if (!product || !mongoose.isValidObjectId(product)) return null;
       const price = Number((item as { price?: unknown }).price);
       const quantity = Number((item as { quantity?: unknown }).quantity);
       if (!Number.isFinite(price) || !Number.isFinite(quantity) || quantity <= 0) return null;
       const modifiers = sanitizeModifiers((item as { modifiers?: unknown }).modifiers);
       return {
-        product: (item as { product?: unknown }).product,
+        product,
         name: cleanText((item as { name?: unknown }).name, 120),
         price,
         quantity,
@@ -96,7 +109,13 @@ router.get("/", authenticate, async (req: AuthenticatedRequest, res: Response) =
     const { status, type, date, page = "1", limit = "50" } = req.query as Record<string, string>;
 
     const query: any = {};
-    if (status && status !== "all") query.status = status;
+    if (status && status !== "all") {
+      if (status === "active") {
+        query.status = { $in: ACTIVE_ORDER_STATUSES };
+      } else {
+        query.status = status;
+      }
+    }
     if (type && type !== "all") query.type = type;
     if (date) {
       const start = new Date(date);
@@ -132,7 +151,22 @@ router.post("/", authenticate, async (req: AuthenticatedRequest, res: Response) 
     const normalizedItems = sanitizeOrderItems(items);
 
     if (!type || !normalizedItems.length) {
-      return sendError(res, "Order type and items are required", 400);
+      return sendError(res, "Order type and at least one valid item are required", 400);
+    }
+
+    if (type === "dine-in") {
+      const table = String(tableNumber || "").trim();
+      if (!table) {
+        return sendError(res, "Table number is required for dine-in orders", 400);
+      }
+      const tableTaken = await Order.exists({
+        type: "dine-in",
+        tableNumber: table,
+        status: { $in: ACTIVE_ORDER_STATUSES },
+      });
+      if (tableTaken) {
+        return sendError(res, `Table ${table} is already occupied`, 409);
+      }
     }
 
     const subtotal = normalizedItems.reduce((sum, item) => sum + item.subtotal, 0);
@@ -153,13 +187,15 @@ router.post("/", authenticate, async (req: AuthenticatedRequest, res: Response) 
         ? status
         : "accepted";
 
+    const validCustomerId = typeof customerId === "string" && mongoose.isValidObjectId(customerId) ? customerId : null;
+
     const order = await Order.create({
       orderNumber: generateOrderNumber(),
       type,
       status: orderStatus,
       items: normalizedItems,
       customerName: customerName || "Walk-in",
-      customer: customerId || null,
+      customer: validCustomerId,
       tableNumber: tableNumber || "",
       notes: cleanText(notes, 500),
       subtotal,
@@ -232,14 +268,29 @@ router.patch("/:id", authenticate, async (req: AuthenticatedRequest, res: Respon
         }
         const msg = e instanceof Error ? e.message : String(e);
         const code = (e as { code?: number })?.code;
-        if (code === 20 || /replica set/i.test(msg) || /Transaction numbers/i.test(msg)) {
-          return sendError(
-            res,
-            "MongoDB transactions require a replica set. Use MongoDB Atlas or run mongod with --replSet (see server/MONGODB-TRANSACTIONS.md).",
-            503
-          );
+        const isTransactionUnavailable = code === 20 || /replica set/i.test(msg) || /Transaction numbers/i.test(msg);
+        if (isTransactionUnavailable) {
+          console.warn("Transactions unavailable, falling back to non-transactional order update.");
+          try {
+            if (nextStatus === "preparing") {
+              await reserveInventoryForOrder({ orderId, userId: req.user.id, session: null });
+            } else {
+              await releaseReservationForOrder({ orderId, session: null });
+            }
+            await Order.updateOne({ _id: orderId }, updates);
+          } catch (innerError: unknown) {
+            if (innerError instanceof InsufficientStockError) {
+              return sendError(res, innerError.message, 409, {
+                code: innerError.code,
+                shortages: innerError.shortages,
+              });
+            }
+            console.error("Order update fallback error:", innerError);
+            return sendError(res, "Failed to update order", 500);
+          }
+        } else {
+          throw e;
         }
-        throw e;
       } finally {
         session.endSession();
       }

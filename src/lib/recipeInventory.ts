@@ -72,7 +72,7 @@ export type BillingRecipeInput = {
   total: number;
 };
 
-async function runBillingInSession(s: ClientSession, input: BillingRecipeInput) {
+async function runBillingInSession(s: ClientSession | null, input: BillingRecipeInput) {
   const {
     orderId,
     userId,
@@ -91,7 +91,9 @@ async function runBillingInSession(s: ClientSession, input: BillingRecipeInput) 
 
   const changeGiven = Math.max(0, amountPaid - total);
 
-  const order = await Order.findById(orderId).session(s);
+  const orderQuery = Order.findById(orderId);
+  if (s) orderQuery.session(s);
+  const order = await orderQuery;
   if (!order) throw new Error("ORDER_NOT_FOUND");
   if (order.status === "completed") throw new Error("ORDER_ALREADY_BILLED");
 
@@ -103,7 +105,9 @@ async function runBillingInSession(s: ClientSession, input: BillingRecipeInput) 
   }[] = [];
 
   // Prefer consuming an active kitchen reservation (reserve on preparing, consume on billing).
-  const activeReservation = await InventoryReservation.findOne({ order: orderId, status: "active" }).session(s);
+  const reservationQuery = InventoryReservation.findOne({ order: orderId, status: "active" });
+  if (s) reservationQuery.session(s);
+  const activeReservation = await reservationQuery;
 
   if (activeReservation) {
     for (const line of (activeReservation.lines as any[]) || []) {
@@ -126,7 +130,7 @@ async function runBillingInSession(s: ClientSession, input: BillingRecipeInput) 
 
     activeReservation.status = "consumed";
     (activeReservation as any).consumedAt = new Date();
-    await activeReservation.save({ session: s });
+    await activeReservation.save({ session: s ?? undefined });
   } else {
     for (const [invId, qty] of requirements) {
       const { allocations } = await deductInventoryFifo({
@@ -172,10 +176,10 @@ async function runBillingInSession(s: ClientSession, input: BillingRecipeInput) 
         issuedBy: userId,
       },
     ],
-    { session: s }
+    { session: s ?? undefined }
   );
 
-  await Order.findByIdAndUpdate(orderId, { status: "completed", taxAmount, total }, { session: s });
+  await Order.findByIdAndUpdate(orderId, { status: "completed", taxAmount, total }, { session: s ?? undefined });
 
   if (linesForLedger.length > 0) {
     await InventoryConsumption.create(
@@ -187,7 +191,7 @@ async function runBillingInSession(s: ClientSession, input: BillingRecipeInput) 
           createdBy: userId,
         },
       ],
-      { session: s }
+      { session: s ?? undefined }
     );
   }
 
@@ -207,10 +211,11 @@ export async function executeBillingWithRecipeConsumption(input: BillingRecipeIn
     if (e instanceof InsufficientStockError) throw e;
     const msg = e instanceof Error ? e.message : String(e);
     const code = (e as { code?: number })?.code;
-    if (code === 20 || /replica set/i.test(msg) || /Transaction numbers/i.test(msg)) {
-      throw new Error(
-        "MongoDB transactions require a replica set. Use MongoDB Atlas or run mongod with --replSet (see server/MONGODB-TRANSACTIONS.md)."
-      );
+    const isTransactionUnavailable = code === 20 || /replica set/i.test(msg) || /Transaction numbers/i.test(msg);
+    if (isTransactionUnavailable) {
+      console.warn("Transactions unavailable, falling back to non-transactional billing.");
+      const invoice = await runBillingInSession(null, input);
+      return { invoice };
     }
     throw e;
   } finally {

@@ -11,6 +11,18 @@ import Customer from "../models/Customer";
 
 const router: Router = Router();
 
+const parseDateParam = (value?: string, isStart = true) => {
+  if (!value) return null;
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return null;
+  if (isStart) {
+    date.setHours(0, 0, 0, 0);
+  } else {
+    date.setHours(23, 59, 59, 999);
+  }
+  return date;
+};
+
 router.get("/", authenticate, async (req: AuthenticatedRequest, res: Response) => {
   try {
     await connectDB();
@@ -19,43 +31,46 @@ router.get("/", authenticate, async (req: AuthenticatedRequest, res: Response) =
     todayStart.setHours(0, 0, 0, 0);
     const todayEnd = new Date();
     todayEnd.setHours(23, 59, 59, 999);
-    const todayFilter = { createdAt: { $gte: todayStart, $lte: todayEnd } };
+
+    const rangeStart = parseDateParam(req.query.from as string, true) ?? todayStart;
+    const rangeEnd = parseDateParam(req.query.to as string, false) ?? todayEnd;
+    const rangeFilter = { createdAt: { $gte: rangeStart, $lte: rangeEnd } };
 
     const [
-      todayInvoices,
+      rangeInvoices,
       pendingOrders,
       completedOrders,
       lowStockItems,
-      todayExpenses,
+      rangeExpenses,
       presentToday,
       totalCustomers,
       recentOrders,
       topProducts,
       weeklyRevenue,
     ] = await Promise.all([
-      Invoice.find(todayFilter).lean(),
-      Order.countDocuments({ status: { $in: ["open", "accepted", "preparing"] } }),
-      Order.countDocuments({ status: "completed", ...todayFilter }),
+      Invoice.find(rangeFilter).lean(),
+      Order.countDocuments({ status: { $in: ["open", "accepted", "preparing"] }, ...rangeFilter }),
+      Order.countDocuments({ status: "completed", ...rangeFilter }),
       Inventory.countDocuments({
         isActive: true,
         $expr: { $lte: ["$currentStock", "$minimumStock"] },
       }),
       Expense.aggregate([
-        { $match: { date: { $gte: todayStart, $lte: todayEnd } } },
+        { $match: { date: { $gte: rangeStart, $lte: rangeEnd } } },
         { $group: { _id: null, total: { $sum: "$amount" } } },
       ]),
       Attendance.countDocuments({
-        date: { $gte: todayStart, $lte: todayEnd },
+        date: { $gte: rangeStart, $lte: rangeEnd },
         status: "present",
       }),
       Customer.countDocuments({ isActive: true }),
-      Order.find(todayFilter)
+      Order.find(rangeFilter)
         .populate("customer", "name")
         .sort({ createdAt: -1 })
         .limit(8)
         .lean(),
       Invoice.aggregate([
-        { $match: todayFilter },
+        { $match: rangeFilter },
         { $unwind: "$items" },
         {
           $group: {
@@ -68,11 +83,7 @@ router.get("/", authenticate, async (req: AuthenticatedRequest, res: Response) =
         { $limit: 5 },
       ]),
       Invoice.aggregate([
-        {
-          $match: {
-            createdAt: { $gte: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000) },
-          },
-        },
+        { $match: rangeFilter },
         {
           $group: {
             _id: { $dateToString: { format: "%Y-%m-%d", date: "$createdAt" } },
@@ -84,13 +95,13 @@ router.get("/", authenticate, async (req: AuthenticatedRequest, res: Response) =
       ]),
     ]);
 
-    const totalRevenue = (todayInvoices as any[]).reduce((sum, inv) => sum + inv.total, 0);
-    const totalTax = (todayInvoices as any[]).reduce((sum, inv) => sum + inv.taxAmount, 0);
-    const totalDiscount = (todayInvoices as any[]).reduce((sum, inv) => sum + inv.discountAmount, 0);
-    const todayExpenseTotal = (todayExpenses as any[])[0]?.total || 0;
-    const netProfit = totalRevenue - totalTax - todayExpenseTotal;
+    const totalRevenue = (rangeInvoices as any[]).reduce((sum, inv) => sum + inv.total, 0);
+    const totalTax = (rangeInvoices as any[]).reduce((sum, inv) => sum + inv.taxAmount, 0);
+    const totalDiscount = (rangeInvoices as any[]).reduce((sum, inv) => sum + inv.discountAmount, 0);
+    const rangeExpenseTotal = (rangeExpenses as any[])[0]?.total || 0;
+    const netProfit = totalRevenue - totalTax - rangeExpenseTotal;
 
-    const paymentBreakdown = (todayInvoices as any[]).reduce((acc: any, inv) => {
+    const paymentBreakdown = (rangeInvoices as any[]).reduce((acc: any, inv) => {
       acc[inv.paymentMethod] = (acc[inv.paymentMethod] || 0) + inv.total;
       return acc;
     }, {});
@@ -100,14 +111,14 @@ router.get("/", authenticate, async (req: AuthenticatedRequest, res: Response) =
         totalRevenue,
         totalTax,
         totalDiscount,
-        todayExpenseTotal,
+        todayExpenseTotal: rangeExpenseTotal,
         netProfit,
         pendingOrders,
         completedOrders,
         lowStockItems,
         presentToday,
         totalCustomers,
-        invoiceCount: (todayInvoices as any[]).length,
+        invoiceCount: (rangeInvoices as any[]).length,
       },
       recentOrders,
       topProducts,

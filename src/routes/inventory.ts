@@ -20,7 +20,9 @@ router.get("/", authenticate, async (req: AuthenticatedRequest, res: Response) =
     if (lowStock === "true") query.$expr = { $lte: ["$currentStock", "$minimumStock"] };
     if (lowStock === "false") query.$expr = { $gt: ["$currentStock", "$minimumStock"] };
     if (unit) query.unit = unit;
-    if (createdBy) query.createdBy = createdBy;
+    if (createdBy) {
+      query.$or = [{ createdBy }, { lastRestockedBy: createdBy }];
+    }
     if (from || to) {
       const range: any = {};
       if (from) range.$gte = new Date(from);

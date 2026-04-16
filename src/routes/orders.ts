@@ -4,6 +4,7 @@ import { authenticate, AuthenticatedRequest } from "../middleware/auth";
 import { connectDB } from "../lib/mongodb";
 import { sendSuccess, sendError, generateOrderNumber } from "../lib/utils";
 import Order from "../models/Order";
+import Customer from "../models/Customer";
 import { getGstRateForMethod } from "../lib/gst";
 import { computeOrderFinancials } from "../lib/orderAmounts";
 import { getDineInServiceChargePercent } from "../lib/serviceCharge";
@@ -147,7 +148,7 @@ router.get("/", authenticate, async (req: AuthenticatedRequest, res: Response) =
 router.post("/", authenticate, async (req: AuthenticatedRequest, res: Response) => {
   try {
     await connectDB();
-    const { type, items, customerName, customerId, tableNumber, notes, discount, status, paymentMethod } = req.body;
+    const { type, items, customerName, customerPhone, customerId, tableNumber, notes, discount, status, paymentMethod } = req.body;
     const normalizedItems = sanitizeOrderItems(items);
 
     if (!type || !normalizedItems.length) {
@@ -188,14 +189,40 @@ router.post("/", authenticate, async (req: AuthenticatedRequest, res: Response) 
         : "accepted";
 
     const validCustomerId = typeof customerId === "string" && mongoose.isValidObjectId(customerId) ? customerId : null;
+    const phoneValue = typeof customerPhone === "string" ? customerPhone.trim() : "";
+    const normalizedPhone = phoneValue.replace(/[^+\d]/g, "");
+
+    let linkedCustomerId = validCustomerId;
+    let linkedCustomerName = customerName || "Walk-in";
+    if (!linkedCustomerId && normalizedPhone) {
+      const trimmedName = typeof customerName === "string" ? customerName.trim() : "";
+      if (trimmedName && trimmedName.toLowerCase() !== "walk-in") {
+        const existingCustomer = await Customer.findOne({ phone: normalizedPhone });
+        if (existingCustomer) {
+          linkedCustomerId = existingCustomer._id;
+          linkedCustomerName = existingCustomer.name || trimmedName;
+          if (existingCustomer.name !== trimmedName) {
+            existingCustomer.name = trimmedName;
+            await existingCustomer.save();
+          }
+        } else {
+          const createdCustomer = await Customer.create({
+            name: trimmedName,
+            phone: normalizedPhone,
+          });
+          linkedCustomerId = createdCustomer._id;
+          linkedCustomerName = createdCustomer.name;
+        }
+      }
+    }
 
     const order = await Order.create({
       orderNumber: generateOrderNumber(),
       type,
       status: orderStatus,
       items: normalizedItems,
-      customerName: customerName || "Walk-in",
-      customer: validCustomerId,
+      customerName: linkedCustomerName || "Walk-in",
+      customer: linkedCustomerId,
       tableNumber: tableNumber || "",
       notes: cleanText(notes, 500),
       subtotal,

@@ -1,10 +1,14 @@
 import mongoose from "mongoose";
 
+function normalizePhone(value: string): string {
+  return String(value || "").replace(/[^+\d]/g, "");
+}
+
 const CustomerSchema = new mongoose.Schema(
   {
     name: { type: String, required: true, trim: true },
     email: { type: String, lowercase: true, trim: true, default: "" },
-    phone: { type: String, trim: true, default: "" },
+    phone: { type: String, required: true, trim: true, unique: true },
     dateOfBirth: { type: Date, default: null },
     address: { type: String, default: "" },
     loyaltyPoints: { type: Number, default: 0 },
@@ -19,6 +23,13 @@ const CustomerSchema = new mongoose.Schema(
   },
   { timestamps: true }
 );
+
+CustomerSchema.pre("save", function (next) {
+  if (this.phone && typeof this.phone === "string") {
+    this.phone = normalizePhone(this.phone);
+  }
+  next();
+});
 
 export default (mongoose.models.Customer || mongoose.model("Customer", CustomerSchema)) as mongoose.Model<any>;
 

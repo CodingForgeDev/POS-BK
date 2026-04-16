@@ -39,9 +39,23 @@ router.get("/", authenticate, async (req: AuthenticatedRequest, res: Response) =
 router.post("/", authenticate, async (req: AuthenticatedRequest, res: Response) => {
   try {
     await connectDB();
+    const { name, phone } = req.body;
+    if (!name || typeof name !== "string" || !name.trim()) {
+      return sendError(res, "Customer name is required", 400);
+    }
+    if (!phone || typeof phone !== "string" || !phone.trim()) {
+      return sendError(res, "Customer phone is required", 400);
+    }
+
+    req.body.name = name.trim();
+    req.body.phone = String(phone).replace(/[^+\d]/g, "");
+
     const customer = await Customer.create(req.body);
     return sendSuccess(res, customer, "Customer created successfully", 201);
-  } catch (error) {
+  } catch (error: any) {
+    if (error.code === 11000 && error.keyPattern?.phone) {
+      return sendError(res, "Phone number already exists", 409);
+    }
     return sendError(res, "Failed to create customer", 500);
   }
 });
@@ -60,10 +74,24 @@ router.get("/:id", authenticate, async (req: AuthenticatedRequest, res: Response
 router.patch("/:id", authenticate, async (req: AuthenticatedRequest, res: Response) => {
   try {
     await connectDB();
-    const customer = await Customer.findByIdAndUpdate(req.params.id, req.body, { new: true });
+    const { name, phone } = req.body;
+    if (name !== undefined && (typeof name !== "string" || !name.trim())) {
+      return sendError(res, "Customer name is required", 400);
+    }
+    if (phone !== undefined && (typeof phone !== "string" || !phone.trim())) {
+      return sendError(res, "Customer phone is required", 400);
+    }
+
+    if (typeof req.body.name === "string") req.body.name = req.body.name.trim();
+    if (typeof req.body.phone === "string") req.body.phone = String(req.body.phone).replace(/[^+\d]/g, "");
+
+    const customer = await Customer.findByIdAndUpdate(req.params.id, req.body, { new: true, runValidators: true });
     if (!customer) return sendError(res, "Customer not found", 404);
     return sendSuccess(res, customer, "Customer updated successfully");
-  } catch (error) {
+  } catch (error: any) {
+    if (error.code === 11000 && error.keyPattern?.phone) {
+      return sendError(res, "Phone number already exists", 409);
+    }
     return sendError(res, "Failed to update customer", 500);
   }
 });

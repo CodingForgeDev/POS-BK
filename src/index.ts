@@ -23,6 +23,7 @@ import billingRoutes from "./routes/billing";
 import reportsRoutes from "./routes/reports";
 import attendanceRoutes from "./routes/attendance";
 import settingsRoutes from "./routes/settings";
+import rolesRoutes from "./routes/roles";
 import zktecoIclockRoutes from "./routes/zkteco/iclock";
 import zkPullRoutes from "./routes/zkteco/zkPull";
 import { initZkPull } from "./integrations/zkteco/zkPullScheduler";
@@ -76,6 +77,7 @@ app.use("/api/billing", billingRoutes);
 app.use("/api/reports", reportsRoutes);
 app.use("/api/attendance", attendanceRoutes);
 app.use("/api/settings", settingsRoutes);
+app.use("/api/roles", rolesRoutes);
 app.use("/iclock", zktecoIclockRoutes);
 app.use("/api/zk-pull", zkPullRoutes);
 

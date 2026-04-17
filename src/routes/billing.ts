@@ -79,6 +79,7 @@ router.post("/", authenticate, async (req: AuthenticatedRequest, res: Response) 
 
     let invoice;
     try {
+      const invoiceNumber = await generateInvoiceNumber();
       const result = await executeBillingWithRecipeConsumption({
         orderId,
         userId: req.user.id,
@@ -88,7 +89,7 @@ router.post("/", authenticate, async (req: AuthenticatedRequest, res: Response) 
         discountValue,
         notes,
         gstRatePct,
-        invoiceNumber: generateInvoiceNumber(),
+        invoiceNumber,
         discountAmount,
         serviceChargeAmount,
         taxAmount,

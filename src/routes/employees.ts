@@ -5,11 +5,21 @@ import { connectDB } from "../lib/mongodb";
 import { sendSuccess, sendError } from "../lib/utils";
 import Employee from "../models/Employee";
 import User from "../models/User";
+import Role from "../models/Role";
 
 const router: Router = Router();
 
 const SALARY_TYPES = ["hourly", "weekly", "monthly"] as const;
 const USER_ROLES = ["admin", "cashier", "kitchen", "manager"] as const;
+
+async function isAllowedRole(role: unknown): Promise<boolean> {
+  if (typeof role !== "string") return false;
+  const normalized = role.trim();
+  if (!normalized) return false;
+  if (USER_ROLES.includes(normalized as (typeof USER_ROLES)[number])) return true;
+  const existing = await Role.findOne({ name: normalized });
+  return Boolean(existing);
+}
 
 function isPatchBuildError(r: unknown): r is { error: string } {
   return (
@@ -118,10 +128,10 @@ function buildUserUpdatePayload(body: Record<string, unknown>): Record<string, u
     patch.phone = typeof body.phone === "string" ? body.phone.trim() : "";
   }
   if (body.role !== undefined) {
-    if (typeof body.role !== "string" || !USER_ROLES.includes(body.role as (typeof USER_ROLES)[number])) {
+    if (typeof body.role !== "string" || !body.role.trim()) {
       return { error: "Invalid role" };
     }
-    patch.role = body.role;
+    patch.role = body.role.trim();
   }
   if (body.password !== undefined) {
     if (typeof body.password !== "string") return { error: "Invalid password" };
@@ -157,10 +167,15 @@ router.post("/", authenticate, async (req: AuthenticatedRequest, res: Response) 
     const existing = await User.findOne({ email });
     if (existing) return sendError(res, "Email already registered", 409);
 
+    const selectedRole = typeof role === "string" && role.trim() ? role.trim() : "cashier";
+    if (!(await isAllowedRole(selectedRole))) {
+      return sendError(res, "Invalid role", 400);
+    }
+
     const employeeCount = await Employee.countDocuments();
     const employeeId = `EMP-${String(employeeCount + 1).padStart(4, "0")}`;
 
-    const user = await User.create({ name, email, password, role: role || "cashier", phone });
+    const user = await User.create({ name, email, password, role: selectedRole, phone });
 
     const employee = await Employee.create({
       user: user._id,
@@ -242,7 +257,12 @@ router.patch("/:id", authenticate, async (req: AuthenticatedRequest, res: Respon
       if (typeof userPatch.name === "string") user.name = userPatch.name;
       if (typeof userPatch.email === "string") user.email = userPatch.email;
       if (typeof userPatch.phone === "string") user.phone = userPatch.phone;
-      if (typeof userPatch.role === "string") user.role = userPatch.role;
+      if (typeof userPatch.role === "string") {
+        if (!(await isAllowedRole(userPatch.role))) {
+          return sendError(res, "Invalid role", 400);
+        }
+        user.role = userPatch.role;
+      }
 
       if (typeof userPatch.password === "string" && userPatch.password.length > 0) {
         if (userPatch.password.length < 6) {

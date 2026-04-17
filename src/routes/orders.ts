@@ -216,8 +216,9 @@ router.post("/", authenticate, async (req: AuthenticatedRequest, res: Response) 
       }
     }
 
+    const orderNumber = await generateOrderNumber();
     const order = await Order.create({
-      orderNumber: generateOrderNumber(),
+      orderNumber,
       type,
       status: orderStatus,
       items: normalizedItems,

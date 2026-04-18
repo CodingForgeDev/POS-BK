@@ -26,6 +26,7 @@ type NormalizedOrderItem = {
   price: number;
   quantity: number;
   notes: string;
+  isReadyItem: boolean;
   isAddOn: boolean;
   modifiers: NormalizedModifier[];
   subtotal: number;
@@ -96,6 +97,7 @@ function sanitizeOrderItems(rawItems: unknown): NormalizedOrderItem[] {
         price,
         quantity,
         notes: cleanText((item as { notes?: unknown }).notes, 300),
+        isReadyItem: Boolean((item as { isReadyItem?: unknown }).isReadyItem),
         isAddOn: Boolean((item as { isAddOn?: unknown }).isAddOn),
         modifiers,
         subtotal: computeLineSubtotal(price, quantity, modifiers),
@@ -183,10 +185,13 @@ router.post("/", authenticate, async (req: AuthenticatedRequest, res: Response) 
       gstRatePct,
     });
 
+    const allReady = normalizedItems.length > 0 && normalizedItems.every((item) => item.isReadyItem);
     const orderStatus =
       status && ["open", "accepted", "rejected", "preparing", "ready"].includes(status)
         ? status
-        : "accepted";
+        : allReady
+          ? "ready"
+          : "accepted";
 
     const validCustomerId = typeof customerId === "string" && mongoose.isValidObjectId(customerId) ? customerId : null;
     const phoneValue = typeof customerPhone === "string" ? customerPhone.trim() : "";
@@ -265,11 +270,20 @@ router.patch("/:id", authenticate, async (req: AuthenticatedRequest, res: Respon
       "kotPrintedAt",
       "tableNumber",
       "promisedPrepMinutes",
+      "servedAt",
     ];
     const updates: Record<string, unknown> = {};
     allowedFields.forEach((field) => {
       if (req.body[field] !== undefined) updates[field] = req.body[field];
     });
+    if (req.body.servedAt !== undefined) {
+      const servedDate = new Date(req.body.servedAt);
+      if (!Number.isNaN(servedDate.getTime())) {
+        updates.servedAt = servedDate;
+      } else {
+        updates.servedAt = null;
+      }
+    }
     if (updates.status === "preparing") {
       updates.preparingStartedAt = new Date();
     }
@@ -389,6 +403,8 @@ router.patch("/:id/items", authenticate, async (req: AuthenticatedRequest, res: 
 
     if (status && ["accepted", "preparing", "ready"].includes(status)) {
       updatePayload.status = status;
+    } else if (normalizedItems.length > 0 && normalizedItems.every((item) => item.isReadyItem)) {
+      updatePayload.status = "ready";
     }
 
     const updated = await Order.findByIdAndUpdate(req.params.id, updatePayload, { new: true })

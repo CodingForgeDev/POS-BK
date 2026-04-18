@@ -44,7 +44,9 @@ export async function aggregateRecipeRequirements(
     const pid = line.product.toString();
     const p = byId.get(pid) as { recipeLines?: Array<{ inventoryItem: unknown; quantityPerUnit: number }> } | undefined;
     if (!p) {
-      throw new Error(`Product ${pid} not found for order line`);
+      // If the product no longer exists in the catalog, skip its recipe.
+      // We can still create the invoice; there is simply no inventory recipe data available.
+      continue;
     }
     for (const r of p.recipeLines || []) {
       const qpu = Number(r.quantityPerUnit);

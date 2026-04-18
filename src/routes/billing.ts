@@ -67,11 +67,31 @@ router.post("/", authenticate, async (req: AuthenticatedRequest, res: Response) 
     await connectDB();
     const { orderId, paymentMethod, amountPaid, discountType, discountValue, notes } = req.body;
 
-    const order = await Order.findById(orderId);
+    const normalizedOrderId = String(orderId ?? "").trim();
+    if (!normalizedOrderId) {
+      return sendError(res, "Order ID is required", 400);
+    }
+
+    const paymentMethodValue = String(paymentMethod ?? "").trim();
+    if (!paymentMethodValue) {
+      return sendError(res, "Payment method is required", 400);
+    }
+
+    const amountPaidValue = Number(amountPaid);
+    if (!Number.isFinite(amountPaidValue) || amountPaidValue < 0) {
+      return sendError(res, "Amount paid must be a valid non-negative number", 400);
+    }
+
+    const discountTypeValue = ["percentage", "fixed", "none"].includes(String(discountType ?? ""))
+      ? String(discountType)
+      : "none";
+    const discountValueNumber = Number(discountValue ?? 0);
+
+    const order = await Order.findById(normalizedOrderId);
     if (!order) return sendError(res, "Order not found", 404);
     if (order.status === "completed") return sendError(res, "Order already billed", 400);
 
-    const gstRatePct = await getGstRateForMethod(paymentMethod);
+    const gstRatePct = await getGstRateForMethod(paymentMethodValue);
     const { discountAmount, serviceChargeAmount, taxAmount, total } = invoiceTotalsFromOrder(
       order,
       gstRatePct
@@ -81,13 +101,13 @@ router.post("/", authenticate, async (req: AuthenticatedRequest, res: Response) 
     try {
       const invoiceNumber = await generateInvoiceNumber();
       const result = await executeBillingWithRecipeConsumption({
-        orderId,
+        orderId: normalizedOrderId,
         userId: req.user.id,
-        paymentMethod,
-        amountPaid,
-        discountType,
-        discountValue,
-        notes,
+        paymentMethod: paymentMethodValue,
+        amountPaid: amountPaidValue,
+        discountType: discountTypeValue,
+        discountValue: Number.isFinite(discountValueNumber) ? discountValueNumber : 0,
+        notes: String(notes ?? ""),
         gstRatePct,
         invoiceNumber,
         discountAmount,
@@ -97,19 +117,41 @@ router.post("/", authenticate, async (req: AuthenticatedRequest, res: Response) 
       });
       invoice = result.invoice;
     } catch (e: unknown) {
-      if (e instanceof InsufficientStockError) {
-        return sendError(res, e.message, 409, { code: e.code, shortages: e.shortages });
+      const isInvoiceNumberDuplicate =
+        e instanceof Error && /E11000 duplicate key error.*invoiceNumber/i.test(e.message);
+      if (isInvoiceNumberDuplicate) {
+        const retryInvoiceNumber = await generateInvoiceNumber();
+        const retryResult = await executeBillingWithRecipeConsumption({
+          orderId: normalizedOrderId,
+          userId: req.user.id,
+          paymentMethod: paymentMethodValue,
+          amountPaid: amountPaidValue,
+          discountType: discountTypeValue,
+          discountValue: Number.isFinite(discountValueNumber) ? discountValueNumber : 0,
+          notes: String(notes ?? ""),
+          gstRatePct,
+          invoiceNumber: retryInvoiceNumber,
+          discountAmount,
+          serviceChargeAmount,
+          taxAmount,
+          total,
+        });
+        invoice = retryResult.invoice;
+      } else {
+        if (e instanceof InsufficientStockError) {
+          return sendError(res, e.message, 409, { code: e.code, shortages: e.shortages });
+        }
+        if (e instanceof Error && e.message.includes("MongoDB transactions require")) {
+          return sendError(res, e.message, 503);
+        }
+        if (e instanceof Error && e.message === "ORDER_NOT_FOUND") {
+          return sendError(res, "Order not found", 404);
+        }
+        if (e instanceof Error && e.message === "ORDER_ALREADY_BILLED") {
+          return sendError(res, "Order already billed", 400);
+        }
+        throw e;
       }
-      if (e instanceof Error && e.message.includes("MongoDB transactions require")) {
-        return sendError(res, e.message, 503);
-      }
-      if (e instanceof Error && e.message === "ORDER_NOT_FOUND") {
-        return sendError(res, "Order not found", 404);
-      }
-      if (e instanceof Error && e.message === "ORDER_ALREADY_BILLED") {
-        return sendError(res, "Order already billed", 400);
-      }
-      throw e;
     }
 
     if (order.customer) {
@@ -129,8 +171,9 @@ router.post("/", authenticate, async (req: AuthenticatedRequest, res: Response) 
 
     return sendSuccess(res, populated, "Invoice created successfully", 201);
   } catch (error) {
+    const message = error instanceof Error ? error.message || "Failed to create invoice" : "Failed to create invoice";
     console.error("Billing error:", error);
-    return sendError(res, "Failed to create invoice", 500);
+    return sendError(res, message, 500);
   }
 });
 

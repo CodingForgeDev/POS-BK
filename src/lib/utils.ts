@@ -1,5 +1,6 @@
 import mongoose from "mongoose";
 import { Response } from "express";
+import Invoice from "../models/Invoice";
 
 const SequenceCounterSchema = new mongoose.Schema(
   {
@@ -14,16 +15,40 @@ const SequenceCounter =
   mongoose.models.SequenceCounter ||
   mongoose.model("SequenceCounter", SequenceCounterSchema);
 
+async function getMaxInvoiceSequenceNumber(): Promise<number> {
+  const latestInvoice = await Invoice.findOne({ invoiceNumber: /^INV-\d+$/ })
+    .sort({ invoiceNumber: -1 })
+    .lean();
+  if (!latestInvoice || typeof latestInvoice.invoiceNumber !== "string") return 0;
+  const match = latestInvoice.invoiceNumber.match(/^INV-(\d+)$/);
+  return match ? Number(match[1]) : 0;
+}
+
 async function getNextSequence(id: string, date: string | null, startAt = 1): Promise<number> {
-  const update: any = { $inc: { seq: 1 } };
-  if (date !== null) update.$setOnInsert = { date };
-  const counter = await SequenceCounter.findOneAndUpdate(
-    { _id: id },
-    update,
-    { upsert: true, new: true, setDefaultsOnInsert: true }
-  ).lean();
-  const current = counter?.seq ?? startAt;
-  return current < startAt ? startAt : current;
+  while (true) {
+    const update: any = { $inc: { seq: 1 } };
+    if (date !== null) update.$setOnInsert = { date };
+    const counter = await SequenceCounter.findOneAndUpdate(
+      { _id: id },
+      update,
+      { upsert: true, new: true, setDefaultsOnInsert: true }
+    ).lean();
+    const current = Number(counter?.seq ?? startAt);
+    const maxExisting = await getMaxInvoiceSequenceNumber();
+    const expected = Math.max(startAt, current, maxExisting + 1);
+    if (expected === current) {
+      return current < startAt ? startAt : current;
+    }
+
+    const updated = await SequenceCounter.findOneAndUpdate(
+      { _id: id, seq: current },
+      { seq: expected },
+      { new: true }
+    ).lean();
+    if (updated) {
+      return expected;
+    }
+  }
 }
 
 export function sendSuccess(

@@ -23,6 +23,8 @@ const OrderItemSchema = new mongoose.Schema(
     modifiers: { type: [OrderItemModifierSchema], default: [] },
     notes: { type: String, default: "" },
     subtotal: { type: Number, required: true },
+    /** When true, item was already ready and requires no kitchen prep. */
+    isReadyItem: { type: Boolean, default: false },
     /** When true, item was added to an existing ready order — kitchen should prepare only these. */
     isAddOn: { type: Boolean, default: false },
   },
@@ -57,6 +59,7 @@ const OrderSchema = new mongoose.Schema(
     kotPrinted: { type: Boolean, default: false },
     kotPrintedAt: { type: Date },
     promisedPrepMinutes: { type: Number, default: null },
+    servedAt: { type: Date, default: null },
     /** Set when status becomes "preparing" — used for countdown timer on kitchen display. */
     preparingStartedAt: { type: Date, default: null },
   },

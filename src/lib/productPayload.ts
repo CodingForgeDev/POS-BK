@@ -13,6 +13,7 @@ const ALLOWED_KEYS = new Set([
   "taxable",
   "taxRate",
   "preparationTime",
+  "isReadyItem",
   "allergens",
   "sortOrder",
   "recipeLines",

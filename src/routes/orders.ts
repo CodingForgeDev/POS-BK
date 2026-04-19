@@ -524,6 +524,9 @@ router.patch("/:id/items", authenticate, async (req: AuthenticatedRequest, res: 
       gstRatePct,
     });
 
+    const newKitchenStatus = deriveStationStatus(normalizedItems, "kitchen");
+    const newBarStatus = deriveStationStatus(normalizedItems, "bar");
+
     const updatePayload: Record<string, unknown> = {
       items: normalizedItems,
       subtotal,
@@ -534,8 +537,24 @@ router.patch("/:id/items", authenticate, async (req: AuthenticatedRequest, res: 
 
     if (status && ["accepted", "preparing", "ready"].includes(status)) {
       updatePayload.status = status;
-    } else if (normalizedItems.length > 0 && normalizedItems.every((item) => item.isReadyItem)) {
-      updatePayload.status = "ready";
+      if (newKitchenStatus) {
+        updatePayload.kitchenStatus = status === "preparing" && newKitchenStatus !== "ready"
+          ? "preparing"
+          : status === "ready"
+            ? "ready"
+            : newKitchenStatus;
+      }
+      if (newBarStatus) {
+        updatePayload.barStatus = status === "preparing" && newBarStatus !== "ready"
+          ? "preparing"
+          : status === "ready"
+            ? "ready"
+            : newBarStatus;
+      }
+    } else {
+      if (newKitchenStatus) updatePayload.kitchenStatus = newKitchenStatus;
+      if (newBarStatus) updatePayload.barStatus = newBarStatus;
+      updatePayload.status = deriveGlobalOrderStatus(newKitchenStatus, newBarStatus);
     }
 
     const updated = await Order.findByIdAndUpdate(req.params.id, updatePayload, { new: true })

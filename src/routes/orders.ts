@@ -27,15 +27,20 @@ type NormalizedOrderItem = {
   quantity: number;
   notes: string;
   isReadyItem: boolean;
+  station: "kitchen" | "bar";
   isAddOn: boolean;
   modifiers: NormalizedModifier[];
   subtotal: number;
 };
 
+type StationState = "accepted" | "preparing" | "ready";
+
+type NormalizedModifierAction = NormalizedModifier["action"];
+
 const ALLOWED_MODIFIER_ACTIONS = new Set(["add", "no", "extra", "side", "substitute"]);
 const ACTIVE_ORDER_STATUSES = ["open", "accepted", "preparing", "ready"] as const;
 
-function normalizeModifierAction(raw: unknown): NormalizedModifier["action"] {
+function normalizeModifierAction(raw: unknown): NormalizedModifierAction {
   const action = String(raw ?? "add").trim().toLowerCase();
   if (ALLOWED_MODIFIER_ACTIONS.has(action)) return action as NormalizedModifier["action"];
   return "add";
@@ -79,6 +84,37 @@ function computeLineSubtotal(price: number, quantity: number, modifiers: Normali
   return (price + modifierUnitDelta) * quantity;
 }
 
+function sanitizeStation(raw: unknown): "kitchen" | "bar" {
+  const value = String(raw ?? "").trim().toLowerCase();
+  return value === "bar" ? "bar" : "kitchen";
+}
+
+function normalizeStationStatus(raw: unknown): StationState | null {
+  const value = String(raw ?? "").trim().toLowerCase();
+  if (value === "preparing" || value === "ready" || value === "accepted") {
+    return value as StationState;
+  }
+  return null;
+}
+
+function deriveStationStatus(items: NormalizedOrderItem[] | any[], station: "kitchen" | "bar"): StationState | null {
+  const stationItems = Array.isArray(items)
+    ? items.filter((item: any) => item.station === station)
+    : [];
+  if (!stationItems.length) return null;
+  if (stationItems.every((item: any) => Boolean(item.isReadyItem))) return "ready";
+  if (stationItems.some((item: any) => item.isReadyItem)) return "accepted";
+  return "accepted";
+}
+
+function deriveGlobalOrderStatus(kitchenStatus: StationState | null, barStatus: StationState | null): string {
+  const statuses = [kitchenStatus, barStatus].filter((s): s is StationState => s !== null);
+  if (!statuses.length) return "accepted";
+  if (statuses.every((s) => s === "ready")) return "ready";
+  if (statuses.some((s) => s === "preparing")) return "preparing";
+  return "accepted";
+}
+
 function sanitizeOrderItems(rawItems: unknown): NormalizedOrderItem[] {
   if (!Array.isArray(rawItems)) return [];
   return rawItems
@@ -98,6 +134,7 @@ function sanitizeOrderItems(rawItems: unknown): NormalizedOrderItem[] {
         quantity,
         notes: cleanText((item as { notes?: unknown }).notes, 300),
         isReadyItem: Boolean((item as { isReadyItem?: unknown }).isReadyItem),
+        station: sanitizeStation((item as { station?: unknown }).station),
         isAddOn: Boolean((item as { isAddOn?: unknown }).isAddOn),
         modifiers,
         subtotal: computeLineSubtotal(price, quantity, modifiers),
@@ -186,6 +223,16 @@ router.post("/", authenticate, async (req: AuthenticatedRequest, res: Response) 
     });
 
     const allReady = normalizedItems.length > 0 && normalizedItems.every((item) => item.isReadyItem);
+    const kitchenStatus = normalizedItems.some((item) => item.station === "kitchen")
+      ? normalizedItems.filter((item) => item.station === "kitchen").every((item) => item.isReadyItem)
+        ? "ready"
+        : "accepted"
+      : null;
+    const barStatus = normalizedItems.some((item) => item.station === "bar")
+      ? normalizedItems.filter((item) => item.station === "bar").every((item) => item.isReadyItem)
+        ? "ready"
+        : "accepted"
+      : null;
     const orderStatus =
       status && ["open", "accepted", "rejected", "preparing", "ready"].includes(status)
         ? status
@@ -236,6 +283,8 @@ router.post("/", authenticate, async (req: AuthenticatedRequest, res: Response) 
       discountAmount,
       serviceChargeAmount,
       total,
+      kitchenStatus,
+      barStatus,
       servedBy: req.user.id,
     });
 
@@ -284,20 +333,102 @@ router.patch("/:id", authenticate, async (req: AuthenticatedRequest, res: Respon
         updates.servedAt = null;
       }
     }
-    if (updates.status === "preparing") {
-      updates.preparingStartedAt = new Date();
+
+    const station = req.body.station ? sanitizeStation(req.body.station) : null;
+    const stationStatus = station ? normalizeStationStatus(req.body.stationStatus) : null;
+    const stationPromised = typeof req.body.stationPromisedPrepMinutes === 'number'
+      ? Number(req.body.stationPromisedPrepMinutes)
+      : null;
+
+    const orderId = req.params.id;
+    const order = await Order.findById(orderId);
+    if (!order) return sendError(res, 'Order not found', 404);
+    if (['completed', 'cancelled'].includes(order.status)) {
+      return sendError(res, 'Cannot modify a completed or cancelled order', 400);
     }
 
-    const nextStatus = updates.status as string | undefined;
-    const orderId = req.params.id;
+    if (station && stationStatus) {
+      updates[`${station}Status`] = stationStatus;
+      if (stationStatus === 'preparing') {
+        updates[`${station}PromisedPrepMinutes`] = stationPromised || null;
+        updates[`${station}PreparingStartedAt`] = new Date();
+      } else if (stationStatus === 'ready') {
+        const updatedItems = order.items.map((item: any) =>
+          item.station === station ? { ...item, isReadyItem: true } : item
+        );
+        updates.items = updatedItems;
+      } else if (stationStatus === 'accepted') {
+        updates[`${station}PromisedPrepMinutes`] = null;
+        updates[`${station}PreparingStartedAt`] = null;
+      }
+    }
 
-    // Reserve/release inventory around kitchen start/cancel decisions.
-    // This uses a transaction when available; on standalone MongoDB it will error similarly to billing.
-    if (nextStatus === "preparing" || nextStatus === "cancelled" || nextStatus === "rejected") {
+    if (req.body.items !== undefined) {
+      const normalizedItems = sanitizeOrderItems(req.body.items);
+      if (!normalizedItems.length) {
+        return sendError(res, 'At least one valid item is required', 400);
+      }
+      const subtotal = normalizedItems.reduce((sum, item) => sum + item.subtotal, 0);
+      const [gstRatePct, servicePct] = await Promise.all([
+        getGstRateForMethod('default'),
+        getDineInServiceChargePercent(),
+      ]);
+      const { serviceChargeAmount, taxAmount, total } = computeOrderFinancials({
+        subtotal,
+        discountAmountFixed: order.discountAmount || 0,
+        orderType: order.type,
+        serviceChargePercent: servicePct,
+        gstRatePct,
+      });
+
+      updates.items = normalizedItems;
+      updates.subtotal = subtotal;
+      updates.taxAmount = taxAmount;
+      updates.serviceChargeAmount = serviceChargeAmount;
+      updates.total = total;
+    }
+
+    const nextStatus = typeof updates.status === 'string' ? updates.status : undefined;
+    if (nextStatus === 'preparing' && !station) {
+      const stationKey = order.items.some((item: any) => item.station === 'kitchen') && !order.items.some((item: any) => item.station === 'bar')
+        ? 'kitchen'
+        : order.items.some((item: any) => item.station === 'bar') && !order.items.some((item: any) => item.station === 'kitchen')
+          ? 'bar'
+          : null;
+      if (stationKey) {
+        updates[`${stationKey}Status`] = 'preparing';
+        updates[`${stationKey}PreparingStartedAt`] = new Date();
+      }
+      updates.preparingStartedAt = new Date();
+    }
+    if (nextStatus === 'ready' && !station) {
+      const stationKey = order.items.some((item: any) => item.station === 'kitchen') && !order.items.some((item: any) => item.station === 'bar')
+        ? 'kitchen'
+        : order.items.some((item: any) => item.station === 'bar') && !order.items.some((item: any) => item.station === 'kitchen')
+          ? 'bar'
+          : null;
+      if (stationKey) {
+        const updatedItems = order.items.map((item: any) =>
+          item.station === stationKey ? { ...item, isReadyItem: true } : item
+        );
+        updates.items = updatedItems;
+        updates[`${stationKey}Status`] = 'ready';
+      }
+    }
+
+    const currentItems = (updates.items as any[]) ?? order.items;
+    const currentKitchenStatus = (updates.kitchenStatus as StationState) ?? order.kitchenStatus ?? deriveStationStatus(currentItems, 'kitchen');
+    const currentBarStatus = (updates.barStatus as StationState) ?? order.barStatus ?? deriveStationStatus(currentItems, 'bar');
+    const derivedStatus = deriveGlobalOrderStatus(currentKitchenStatus, currentBarStatus);
+    if (!updates.status && !['rejected', 'cancelled', 'completed'].includes(order.status)) {
+      updates.status = derivedStatus;
+    }
+
+    if (updates.status === 'preparing' || updates.status === 'cancelled' || updates.status === 'rejected') {
       const session = await mongoose.startSession();
       try {
         await session.withTransaction(async () => {
-          if (nextStatus === "preparing") {
+          if (updates.status === 'preparing') {
             await reserveInventoryForOrder({ orderId, userId: req.user.id, session });
           } else {
             await releaseReservationForOrder({ orderId, session });
@@ -312,9 +443,9 @@ router.patch("/:id", authenticate, async (req: AuthenticatedRequest, res: Respon
         const code = (e as { code?: number })?.code;
         const isTransactionUnavailable = code === 20 || /replica set/i.test(msg) || /Transaction numbers/i.test(msg);
         if (isTransactionUnavailable) {
-          console.warn("Transactions unavailable, falling back to non-transactional order update.");
+          console.warn('Transactions unavailable, falling back to non-transactional order update.');
           try {
-            if (nextStatus === "preparing") {
+            if (updates.status === 'preparing') {
               await reserveInventoryForOrder({ orderId, userId: req.user.id, session: null });
             } else {
               await releaseReservationForOrder({ orderId, session: null });
@@ -327,8 +458,8 @@ router.patch("/:id", authenticate, async (req: AuthenticatedRequest, res: Respon
                 shortages: innerError.shortages,
               });
             }
-            console.error("Order update fallback error:", innerError);
-            return sendError(res, "Failed to update order", 500);
+            console.error('Order update fallback error:', innerError);
+            return sendError(res, 'Failed to update order', 500);
           }
         } else {
           throw e;
@@ -340,14 +471,14 @@ router.patch("/:id", authenticate, async (req: AuthenticatedRequest, res: Respon
       await Order.updateOne({ _id: orderId }, updates);
     }
 
-    const order = await Order.findById(orderId)
-      .populate("customer", "name phone")
-      .populate("servedBy", "name");
+    const updated = await Order.findById(orderId)
+      .populate('customer', 'name phone')
+      .populate('servedBy', 'name');
 
-    if (!order) return sendError(res, "Order not found", 404);
-    return sendSuccess(res, order, "Order updated successfully");
+    if (!updated) return sendError(res, 'Order not found', 404);
+    return sendSuccess(res, updated, 'Order updated successfully');
   } catch (error) {
-    return sendError(res, "Failed to update order", 500);
+    return sendError(res, 'Failed to update order', 500);
   }
 });
 

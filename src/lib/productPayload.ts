@@ -14,11 +14,17 @@ const ALLOWED_KEYS = new Set([
   "taxRate",
   "preparationTime",
   "isReadyItem",
+  "station",
   "allergens",
   "sortOrder",
   "recipeLines",
   "modifierGroups",
 ]);
+
+function parseStation(raw: unknown): "kitchen" | "bar" {
+  const value = String(raw ?? "").trim().toLowerCase();
+  return value === "bar" ? "bar" : "kitchen";
+}
 
 export function parseRecipeLines(raw: unknown): { inventoryItem: mongoose.Types.ObjectId; quantityPerUnit: number }[] {
   if (raw === undefined || raw === null) return [];
@@ -85,6 +91,8 @@ export function pickProductPayload(body: Record<string, unknown>): Record<string
       out.recipeLines = parseRecipeLines(body.recipeLines);
     } else if (key === "modifierGroups") {
       out.modifierGroups = parseModifierGroups(body.modifierGroups);
+    } else if (key === "station") {
+      out.station = parseStation(body.station);
     } else {
       out[key] = body[key];
     }

@@ -25,6 +25,7 @@ const OrderItemSchema = new mongoose.Schema(
     subtotal: { type: Number, required: true },
     /** When true, item was already ready and requires no kitchen prep. */
     isReadyItem: { type: Boolean, default: false },
+    station: { type: String, enum: ["kitchen", "bar"], default: "kitchen" },
     /** When true, item was added to an existing ready order — kitchen should prepare only these. */
     isAddOn: { type: Boolean, default: false },
   },
@@ -60,6 +61,13 @@ const OrderSchema = new mongoose.Schema(
     kotPrintedAt: { type: Date },
     promisedPrepMinutes: { type: Number, default: null },
     servedAt: { type: Date, default: null },
+    /** Per-station workflow state for Kitchen and Bar. */
+    kitchenStatus: { type: String, enum: ["accepted", "preparing", "ready"], default: null },
+    barStatus: { type: String, enum: ["accepted", "preparing", "ready"], default: null },
+    kitchenPromisedPrepMinutes: { type: Number, default: null },
+    barPromisedPrepMinutes: { type: Number, default: null },
+    kitchenPreparingStartedAt: { type: Date, default: null },
+    barPreparingStartedAt: { type: Date, default: null },
     /** Set when status becomes "preparing" — used for countdown timer on kitchen display. */
     preparingStartedAt: { type: Date, default: null },
   },

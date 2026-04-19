@@ -42,6 +42,7 @@ const ProductSchema = new mongoose.Schema(
     taxRate: { type: Number, default: 10 },
     preparationTime: { type: Number, default: 10 },
     isReadyItem: { type: Boolean, default: false },
+    station: { type: String, enum: ["kitchen", "bar"], default: "kitchen" },
     allergens: [{ type: String }],
     sortOrder: { type: Number, default: 0 },
     recipeLines: { type: [RecipeLineSchema], default: [] },

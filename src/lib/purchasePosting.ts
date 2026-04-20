@@ -215,5 +215,5 @@ export async function postAdjustmentLayerInSession(
     },
     updateOptions
   );
-  await recalculateProductCostPriceForInventoryItem(invId, session);
+  await recalculateProductCostPriceForInventoryItem(String(invId), session);
 }

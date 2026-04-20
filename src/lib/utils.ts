@@ -13,9 +13,11 @@ const SequenceCounterSchema = new mongoose.Schema(
   { collection: "sequence_counters" }
 );
 
+type SequenceCounterDoc = mongoose.InferSchemaType<typeof SequenceCounterSchema>;
+
 const SequenceCounter =
-  mongoose.models.SequenceCounter ||
-  mongoose.model("SequenceCounter", SequenceCounterSchema);
+  (mongoose.models.SequenceCounter as mongoose.Model<SequenceCounterDoc>) ||
+  mongoose.model<SequenceCounterDoc>("SequenceCounter", SequenceCounterSchema);
 
 function extractInvoiceSequence(invoiceNumber: string): number | null {
   const match = invoiceNumber.match(/^INV-(\d+)$/);
@@ -44,7 +46,7 @@ async function getNextSequence(id: string, startAt = 1): Promise<number> {
   const counter = await SequenceCounter.findOneAndUpdate(
     { _id: id },
     { $inc: { seq: 1 } },
-    { upsert: true, new: true, setDefaultsOnInsert: true }
+    { upsert: true, returnDocument: "after", setDefaultsOnInsert: true }
   ).lean();
 
   let current = Number(counter?.seq ?? startAt);
@@ -59,7 +61,7 @@ async function getNextSequence(id: string, startAt = 1): Promise<number> {
       const updated = await SequenceCounter.findOneAndUpdate(
         { _id: id },
         { seq: expected },
-        { new: true }
+        { returnDocument: "after" }
       ).lean();
       current = Number(updated?.seq ?? expected);
     }
@@ -72,7 +74,7 @@ async function getNextSequence(id: string, startAt = 1): Promise<number> {
       const updated = await SequenceCounter.findOneAndUpdate(
         { _id: id },
         { seq: expected },
-        { new: true }
+        { returnDocument: "after" }
       ).lean();
       current = Number(updated?.seq ?? expected);
     }

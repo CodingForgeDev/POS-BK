@@ -79,6 +79,13 @@ function sanitizeModifiers(raw: unknown): NormalizedModifier[] {
   return out;
 }
 
+function isDuplicateOrderNumberError(error: unknown): boolean {
+  return (
+    error instanceof Error &&
+    /E11000 duplicate key error.*orderNumber/i.test(error.message)
+  );
+}
+
 function computeLineSubtotal(price: number, quantity: number, modifiers: NormalizedModifier[]): number {
   const modifierUnitDelta = modifiers.reduce((sum, mod) => sum + mod.priceDelta, 0);
   return (price + modifierUnitDelta) * quantity;
@@ -268,25 +275,40 @@ router.post("/", authenticate, async (req: AuthenticatedRequest, res: Response) 
       }
     }
 
-    const orderNumber = await generateOrderNumber();
-    const order = await Order.create({
-      orderNumber,
-      type,
-      status: orderStatus,
-      items: normalizedItems,
-      customerName: linkedCustomerName || "Walk-in",
-      customer: linkedCustomerId,
-      tableNumber: tableNumber || "",
-      notes: cleanText(notes, 500),
-      subtotal,
-      taxAmount,
-      discountAmount,
-      serviceChargeAmount,
-      total,
-      kitchenStatus,
-      barStatus,
-      servedBy: req.user.id,
-    });
+    let order: any = null;
+    let attempt = 0;
+    const maxAttempts = 3;
+
+    while (attempt < maxAttempts) {
+      const orderNumber = await generateOrderNumber();
+      try {
+        order = await Order.create({
+          orderNumber,
+          type,
+          status: orderStatus,
+          items: normalizedItems,
+          customerName: linkedCustomerName || "Walk-in",
+          customer: linkedCustomerId,
+          tableNumber: tableNumber || "",
+          notes: cleanText(notes, 500),
+          subtotal,
+          taxAmount,
+          discountAmount,
+          serviceChargeAmount,
+          total,
+          kitchenStatus,
+          barStatus,
+          servedBy: req.user.id,
+        });
+        break;
+      } catch (error) {
+        if (isDuplicateOrderNumberError(error) && attempt < maxAttempts - 1) {
+          attempt += 1;
+          continue;
+        }
+        throw error;
+      }
+    }
 
     return sendSuccess(res, order, "Order created successfully", 201);
   } catch (error) {

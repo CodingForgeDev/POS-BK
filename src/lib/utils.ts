@@ -1,6 +1,8 @@
 import mongoose from "mongoose";
 import { Response } from "express";
 import Invoice from "../models/Invoice";
+import Order from "../models/Order";
+import { startOfBusinessDay } from "./appTimezone";
 
 const SequenceCounterSchema = new mongoose.Schema(
   {
@@ -15,40 +17,68 @@ const SequenceCounter =
   mongoose.models.SequenceCounter ||
   mongoose.model("SequenceCounter", SequenceCounterSchema);
 
-async function getMaxInvoiceSequenceNumber(): Promise<number> {
-  const latestInvoice = await Invoice.findOne({ invoiceNumber: /^INV-\d+$/ })
-    .sort({ invoiceNumber: -1 })
-    .lean();
-  if (!latestInvoice || typeof latestInvoice.invoiceNumber !== "string") return 0;
-  const match = latestInvoice.invoiceNumber.match(/^INV-(\d+)$/);
-  return match ? Number(match[1]) : 0;
+function extractInvoiceSequence(invoiceNumber: string): number | null {
+  const match = invoiceNumber.match(/^INV-(\d+)$/);
+  if (!match) return null;
+  const seq = Number(match[1]);
+  if (!Number.isFinite(seq)) return null;
+  return seq;
 }
 
-async function getNextSequence(id: string, date: string | null, startAt = 1): Promise<number> {
-  while (true) {
-    const update: any = { $inc: { seq: 1 } };
-    if (date !== null) update.$setOnInsert = { date };
-    const counter = await SequenceCounter.findOneAndUpdate(
-      { _id: id },
-      update,
-      { upsert: true, new: true, setDefaultsOnInsert: true }
-    ).lean();
-    const current = Number(counter?.seq ?? startAt);
-    const maxExisting = await getMaxInvoiceSequenceNumber();
-    const expected = Math.max(startAt, current, maxExisting + 1);
-    if (expected === current) {
-      return current < startAt ? startAt : current;
-    }
+async function getMaxInvoiceSequenceNumber(): Promise<number> {
+  const invoices = await Invoice.find({ invoiceNumber: /^INV-\d+$/ })
+    .select("invoiceNumber")
+    .lean();
+  let max = 0;
+  for (const invoice of invoices) {
+    if (typeof invoice.invoiceNumber !== "string") continue;
+    const seq = extractInvoiceSequence(invoice.invoiceNumber);
+    if (seq === null) continue;
+    if (seq < 1000 || seq > 999999) continue;
+    max = Math.max(max, seq);
+  }
+  return max;
+}
 
-    const updated = await SequenceCounter.findOneAndUpdate(
-      { _id: id, seq: current },
-      { seq: expected },
-      { new: true }
-    ).lean();
-    if (updated) {
-      return expected;
+async function getNextSequence(id: string, startAt = 1): Promise<number> {
+  const counter = await SequenceCounter.findOneAndUpdate(
+    { _id: id },
+    { $inc: { seq: 1 } },
+    { upsert: true, new: true, setDefaultsOnInsert: true }
+  ).lean();
+
+  let current = Number(counter?.seq ?? startAt);
+  if (current < startAt) {
+    current = startAt;
+  }
+
+  if (id.startsWith("ORD-") && current >= 100000) {
+    const orderCount = await Order.countDocuments({ orderNumber: new RegExp(`^${id}-\\d+$`) });
+    const expected = Math.max(startAt, orderCount + 1);
+    if (expected < current) {
+      const updated = await SequenceCounter.findOneAndUpdate(
+        { _id: id },
+        { seq: expected },
+        { new: true }
+      ).lean();
+      current = Number(updated?.seq ?? expected);
     }
   }
+
+  if (id === "INV" && current >= 100000) {
+    const maxExisting = await getMaxInvoiceSequenceNumber();
+    const expected = Math.max(startAt, maxExisting + 1);
+    if (expected < current) {
+      const updated = await SequenceCounter.findOneAndUpdate(
+        { _id: id },
+        { seq: expected },
+        { new: true }
+      ).lean();
+      current = Number(updated?.seq ?? expected);
+    }
+  }
+
+  return current;
 }
 
 export function sendSuccess(
@@ -72,19 +102,19 @@ export function sendError(
 }
 
 export async function generateOrderNumber(): Promise<string> {
-  const now = new Date();
+  const now = startOfBusinessDay(new Date());
   const yy = String(now.getFullYear()).slice(-2);
   const mm = String(now.getMonth() + 1).padStart(2, "0");
   const dd = String(now.getDate()).padStart(2, "0");
   const dateCode = `${yy}${mm}${dd}`;
   const counterId = `ORD-${dateCode}`;
 
-  const seq = await getNextSequence(counterId, dateCode, 1);
+  const seq = await getNextSequence(counterId, 1);
   return `ORD-${dateCode}-${String(seq).padStart(2, "0")}`;
 }
 
 export async function generateInvoiceNumber(): Promise<string> {
   const counterId = "INV";
-  const seq = await getNextSequence(counterId, null, 1000);
+  const seq = await getNextSequence(counterId, 1000);
   return `INV-${String(seq).padStart(4, "0")}`;
 }

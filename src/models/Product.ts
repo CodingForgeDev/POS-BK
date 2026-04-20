@@ -5,6 +5,7 @@ const RecipeLineSchema = new mongoose.Schema(
   {
     inventoryItem: { type: mongoose.Schema.Types.ObjectId, ref: "Inventory", required: true },
     quantityPerUnit: { type: Number, required: true, min: 0 },
+    unit: { type: String, default: "" },
   },
   { _id: false }
 );

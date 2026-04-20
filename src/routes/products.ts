@@ -4,6 +4,7 @@ import { connectDB } from "../lib/mongodb";
 import { sendSuccess, sendError } from "../lib/utils";
 import { pickProductPayload } from "../lib/productPayload";
 import Product from "../models/Product";
+import { calculateRecipeCostPriceForRecipe } from "../lib/recipeInventory";
 
 const router: Router = Router();
 
@@ -18,7 +19,10 @@ router.get("/", authenticate, async (req: AuthenticatedRequest, res: Response) =
 
     const products = await Product.find(query)
       .populate("category", "name color")
-      .populate("recipeLines.inventoryItem", "name unit currentStock minimumStock")
+      .populate(
+        "recipeLines.inventoryItem",
+        "name unit currentStock minimumStock costPerUnit"
+      )
       .sort({ sortOrder: 1, name: 1 })
       .lean();
 
@@ -41,9 +45,15 @@ router.post("/", authenticate, async (req: AuthenticatedRequest, res: Response) 
       const msg = e instanceof Error ? e.message : "Invalid payload";
       return sendError(res, msg, 400);
     }
+    if (Array.isArray(payload.recipeLines) && payload.recipeLines.length > 0) {
+      payload.costPrice = await calculateRecipeCostPriceForRecipe(payload.recipeLines as any[]);
+    }
     const product = await Product.create(payload);
     await product.populate("category", "name color");
-    await product.populate("recipeLines.inventoryItem", "name unit currentStock minimumStock");
+    await product.populate(
+      "recipeLines.inventoryItem",
+      "name unit currentStock minimumStock costPerUnit"
+    );
     return sendSuccess(res, product, "Product created successfully", 201);
   } catch (error) {
     return sendError(res, "Failed to create product", 500);
@@ -55,7 +65,10 @@ router.get("/:id", authenticate, async (req: AuthenticatedRequest, res: Response
     await connectDB();
     const product = await Product.findById(req.params.id)
       .populate("category", "name color")
-      .populate("recipeLines.inventoryItem", "name unit currentStock minimumStock");
+      .populate(
+        "recipeLines.inventoryItem",
+        "name unit currentStock minimumStock costPerUnit"
+      );
     if (!product) return sendError(res, "Product not found", 404);
     return sendSuccess(res, product);
   } catch (error) {
@@ -76,12 +89,18 @@ router.patch("/:id", authenticate, async (req: AuthenticatedRequest, res: Respon
       const msg = e instanceof Error ? e.message : "Invalid payload";
       return sendError(res, msg, 400);
     }
+    if (Array.isArray(update.recipeLines) && update.recipeLines.length > 0) {
+      update.costPrice = await calculateRecipeCostPriceForRecipe(update.recipeLines as any[]);
+    }
     if (Object.keys(update).length === 0) {
       return sendError(res, "No valid fields to update", 400);
     }
     const product = await Product.findByIdAndUpdate(req.params.id, update, { new: true })
       .populate("category", "name color")
-      .populate("recipeLines.inventoryItem", "name unit currentStock minimumStock");
+      .populate(
+        "recipeLines.inventoryItem",
+        "name unit currentStock minimumStock costPerUnit"
+      );
     if (!product) return sendError(res, "Product not found", 404);
     return sendSuccess(res, product, "Product updated successfully");
   } catch (error) {

@@ -7,6 +7,7 @@ import Inventory from "../models/Inventory";
 import StockLayer from "../models/StockLayer";
 import { postAdjustmentLayerInSession } from "../lib/purchasePosting";
 import { deductInventoryFifo } from "../lib/inventoryFifo";
+import { recalculateProductCostPriceForInventoryItem } from "../lib/recipeInventory";
 import { InsufficientStockError } from "../lib/inventoryErrors";
 
 const router: Router = Router();
@@ -293,6 +294,9 @@ router.patch("/:id", authenticate, async (req: AuthenticatedRequest, res: Respon
 
     const item = await Inventory.findByIdAndUpdate(req.params.id, updateBody, { new: true });
     if (!item) return sendError(res, "Inventory item not found", 404);
+    if (updateBody.costPerUnit !== undefined) {
+      await recalculateProductCostPriceForInventoryItem(req.params.id);
+    }
     return sendSuccess(res, item, "Inventory item updated");
   } catch (error) {
     return sendError(res, "Failed to update inventory item", 500);

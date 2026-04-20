@@ -8,6 +8,111 @@ import InventoryReservation from "../models/InventoryReservation";
 import { InsufficientStockError } from "./inventoryErrors";
 import { deductInventoryFifo, type FifoAllocation } from "./inventoryFifo";
 
+const UNIT_GROUP: Record<string, string> = {
+  ml: "volume",
+  l: "volume",
+  g: "weight",
+  kg: "weight",
+};
+
+const UNIT_FACTOR: Record<string, number> = {
+  ml: 1,
+  l: 1000,
+  g: 1,
+  kg: 1000,
+};
+
+function normalizeUnit(unit: string): string {
+  return String(unit ?? "").trim().toLowerCase();
+}
+
+function isConvertibleUnit(unit: string): boolean {
+  const normalized = normalizeUnit(unit);
+  return Boolean(UNIT_GROUP[normalized]);
+}
+
+function convertBetweenUnits(quantity: number, fromUnit: string, toUnit: string): number {
+  const fromNormalized = normalizeUnit(fromUnit);
+  const toNormalized = normalizeUnit(toUnit);
+  if (!quantity || fromNormalized === toNormalized) return quantity;
+  const fromGroup = UNIT_GROUP[fromNormalized];
+  const toGroup = UNIT_GROUP[toNormalized];
+  if (fromGroup && toGroup && fromGroup === toGroup) {
+    const fromFactor = UNIT_FACTOR[fromNormalized] ?? 1;
+    const toFactor = UNIT_FACTOR[toNormalized] ?? 1;
+    return (quantity * fromFactor) / toFactor;
+  }
+  return quantity;
+}
+
+export async function calculateRecipeCostPriceForRecipe(
+  recipeLines: Array<{ inventoryItem: mongoose.Types.ObjectId; quantityPerUnit: number; unit?: string }>,
+  session?: ClientSession | null
+): Promise<number> {
+  if (!recipeLines?.length) return 0;
+  const invIds = Array.from(new Set(recipeLines.map((line) => String(line.inventoryItem))));
+  const inventoryQuery = Inventory.find({ _id: { $in: invIds } }).select("unit costPerUnit").lean();
+  if (session) inventoryQuery.session(session);
+  const inventoryDocs = await inventoryQuery;
+  const inventoryMap = new Map<string, { unit?: string; costPerUnit?: number }>(
+    inventoryDocs.map((inv: any) => [String(inv._id), { unit: String(inv.unit || "").toLowerCase(), costPerUnit: Number(inv.costPerUnit || 0) }])
+  );
+
+  return recipeLines.reduce((sum, line) => {
+    const inv = inventoryMap.get(String(line.inventoryItem));
+    if (!inv) return sum;
+    const inventoryUnit = inv.unit || "";
+    const recipeUnit = normalizeUnit(line.unit || inventoryUnit);
+    const adjustedQuantity = convertBetweenUnits(line.quantityPerUnit, recipeUnit, inventoryUnit);
+    return sum + adjustedQuantity * (inv.costPerUnit ?? 0);
+  }, 0);
+}
+
+export async function recalculateProductCostPriceForInventoryItem(
+  inventoryItemId: string,
+  session?: ClientSession | null
+): Promise<void> {
+  const products = await Product.find({ "recipeLines.inventoryItem": inventoryItemId })
+    .select("recipeLines")
+    .lean();
+
+  if (!products.length) return;
+
+  const productIds = products.map((product: any) => String(product._id));
+  const recipeLinesByProduct = new Map<string, any[]>(
+    products.map((product: any) => [String(product._id), product.recipeLines || []])
+  );
+
+  const inventoryItemIds = Array.from(
+    new Set(products.flatMap((product: any) => (product.recipeLines || []).map((line: any) => String(line.inventoryItem))))
+  );
+
+  const inventoryQuery = Inventory.find({ _id: { $in: inventoryItemIds } }).select("unit costPerUnit").lean();
+  if (session) inventoryQuery.session(session);
+  const inventoryDocs = await inventoryQuery;
+  const inventoryMap = new Map<string, { unit?: string; costPerUnit?: number }>(
+    inventoryDocs.map((inv: any) => [String(inv._id), { unit: String(inv.unit || "").toLowerCase(), costPerUnit: Number(inv.costPerUnit || 0) }])
+  );
+
+  for (const productId of productIds) {
+    const recipeLines = recipeLinesByProduct.get(productId) || [];
+    const newCostPrice = recipeLines.reduce((sum, line: any) => {
+      const inv = inventoryMap.get(String(line.inventoryItem));
+      if (!inv) return sum;
+      const inventoryUnit = inv.unit || "";
+      const recipeUnit = normalizeUnit(line.unit || inventoryUnit);
+      const adjustedQuantity = convertBetweenUnits(Number(line.quantityPerUnit), recipeUnit, inventoryUnit);
+      return sum + adjustedQuantity * (inv.costPerUnit ?? 0);
+    }, 0);
+
+    await Product.updateOne(
+      { _id: productId },
+      { $set: { costPrice: newCostPrice } },
+      session ? { session } : undefined
+    );
+  }
+}
+
 export { INSUFFICIENT_STOCK, InsufficientStockError, type ShortageDetail } from "./inventoryErrors";
 
 export type OrderItemLike = { product: mongoose.Types.ObjectId; quantity: number };
@@ -39,10 +144,26 @@ export async function aggregateRecipeRequirements(
   const products = await q;
   const byId = new Map(products.map((p: any) => [p._id.toString(), p]));
 
+  const inventoryIds = Array.from(
+    new Set(
+      products.flatMap((p: any) =>
+        (p.recipeLines || []).map((line: any) => String(line.inventoryItem))
+      )
+    )
+  );
+  const invQuery = Inventory.find({ _id: { $in: inventoryIds } }).select("unit").lean();
+  if (session) invQuery.session(session);
+  const inventoryDocs = await invQuery;
+  const inventoryUnitMap = new Map<string, string>(
+    inventoryDocs.map((inv: any) => [String(inv._id), String(inv.unit || "").toLowerCase()])
+  );
+
   const totals = new Map<string, number>();
   for (const line of normalized) {
     const pid = line.product.toString();
-    const p = byId.get(pid) as { recipeLines?: Array<{ inventoryItem: unknown; quantityPerUnit: number }> } | undefined;
+    const p = byId.get(pid) as {
+      recipeLines?: Array<{ inventoryItem: unknown; quantityPerUnit: number; unit?: string }>;
+    } | undefined;
     if (!p) {
       // If the product no longer exists in the catalog, skip its recipe.
       // We can still create the invoice; there is simply no inventory recipe data available.
@@ -52,7 +173,10 @@ export async function aggregateRecipeRequirements(
       const qpu = Number(r.quantityPerUnit);
       if (!r.inventoryItem || !(qpu > 0)) continue;
       const invId = String(r.inventoryItem);
-      totals.set(invId, (totals.get(invId) || 0) + qpu * line.quantity);
+      const inventoryUnit = inventoryUnitMap.get(invId) || "";
+      const recipeUnit = normalizeUnit(String(r.unit || inventoryUnit));
+      const adjustedQpu = convertBetweenUnits(qpu, recipeUnit, inventoryUnit);
+      totals.set(invId, (totals.get(invId) || 0) + adjustedQpu * line.quantity);
     }
   }
   return totals;

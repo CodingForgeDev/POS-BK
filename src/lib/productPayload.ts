@@ -26,17 +26,22 @@ function parseStation(raw: unknown): "kitchen" | "bar" {
   return value === "bar" ? "bar" : "kitchen";
 }
 
-export function parseRecipeLines(raw: unknown): { inventoryItem: mongoose.Types.ObjectId; quantityPerUnit: number }[] {
+export function parseRecipeLines(raw: unknown): { inventoryItem: mongoose.Types.ObjectId; quantityPerUnit: number; unit?: string }[] {
   if (raw === undefined || raw === null) return [];
   if (!Array.isArray(raw)) throw new Error("recipeLines must be an array");
-  const out: { inventoryItem: mongoose.Types.ObjectId; quantityPerUnit: number }[] = [];
+  const out: { inventoryItem: mongoose.Types.ObjectId; quantityPerUnit: number; unit?: string }[] = [];
   for (const row of raw) {
     if (!row || typeof row !== "object") throw new Error("Invalid recipe line");
     const inv = (row as { inventoryItem?: unknown }).inventoryItem;
     const q = Number((row as { quantityPerUnit?: unknown }).quantityPerUnit);
+    const unit = String((row as { unit?: unknown }).unit ?? "").trim().toLowerCase();
     if (!mongoose.isValidObjectId(inv)) throw new Error("Invalid inventoryItem in recipe");
     if (!(q > 0) || !Number.isFinite(q)) throw new Error("quantityPerUnit must be a positive number");
-    out.push({ inventoryItem: new mongoose.Types.ObjectId(String(inv)), quantityPerUnit: q });
+    out.push({
+      inventoryItem: new mongoose.Types.ObjectId(String(inv)),
+      quantityPerUnit: q,
+      unit: unit || undefined,
+    });
   }
   return out;
 }

@@ -3,6 +3,7 @@ import Purchase from "../models/Purchase";
 import StockLayer from "../models/StockLayer";
 import Inventory from "../models/Inventory";
 import Supplier from "../models/Supplier";
+import { recalculateProductCostPriceForInventoryItem } from "./recipeInventory";
 
 export function weightedAverageCost(currentStock: number, currentCostPerUnit: number, addQty: number, addUnitCost: number): number {
   const cs = Math.max(0, Number(currentStock) || 0);
@@ -135,6 +136,7 @@ export async function postPurchaseInSession(
 
     const updateOptions = session ? { session } : undefined;
     await Inventory.updateOne({ _id: l.inventoryItem }, { $inc: { currentStock: l.quantity }, $set }, updateOptions);
+    await recalculateProductCostPriceForInventoryItem(String(l.inventoryItem), session);
   }
 
   return { purchase: purchaseDoc.toObject() };
@@ -213,4 +215,5 @@ export async function postAdjustmentLayerInSession(
     },
     updateOptions
   );
+  await recalculateProductCostPriceForInventoryItem(invId, session);
 }

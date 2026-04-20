@@ -15,6 +15,7 @@ router.get("/", authenticate, async (_req: AuthenticatedRequest, res: Response) 
       $or: [{ endDate: null }, { endDate: { $gte: now } }],
     })
       .populate("applicableProducts", "name price")
+      .populate("applicableCategories", "name")
       .lean();
     return sendSuccess(res, discounts);
   } catch (error) {

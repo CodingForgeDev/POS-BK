@@ -15,6 +15,8 @@ const RoleSchema = new mongoose.Schema(
     name: { type: String, required: true, unique: true, trim: true },
     description: { type: String, default: "" },
     allowedPaths: { type: [String], default: [] },
+    roleType: { type: String, enum: ["admin", "manager", "staff"], default: "staff" },
+    viewStaffLogins: { type: String, enum: ["all", "own"], default: "own" },
     permissions: {
       type: Map,
       of: PermissionSchema,

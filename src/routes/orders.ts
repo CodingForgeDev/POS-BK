@@ -4,6 +4,7 @@ import { authenticate, AuthenticatedRequest } from "../middleware/auth";
 import { connectDB } from "../lib/mongodb";
 import { sendSuccess, sendError, generateOrderNumber } from "../lib/utils";
 import Order from "../models/Order";
+import { isAdminRoleName } from "../lib/role-utils";
 import Customer from "../models/Customer";
 import { getGstRateForMethod } from "../lib/gst";
 import { computeOrderFinancials } from "../lib/orderAmounts";
@@ -170,6 +171,9 @@ router.get("/", authenticate, async (req: AuthenticatedRequest, res: Response) =
       const end = new Date(date);
       end.setHours(23, 59, 59, 999);
       query.createdAt = { $gte: start, $lte: end };
+    }
+    if (!(await isAdminRoleName(req.user.role))) {
+      query.servedBy = req.user.id;
     }
 
     const pageNum = parseInt(page);

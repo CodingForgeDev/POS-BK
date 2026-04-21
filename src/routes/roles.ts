@@ -3,6 +3,7 @@ import { authenticate, AuthenticatedRequest } from "../middleware/auth";
 import { connectDB } from "../lib/mongodb";
 import { sendSuccess, sendError } from "../lib/utils";
 import Role from "../models/Role";
+import { normalizeRoleType, isAdminOrManagerRoleName } from "../lib/role-utils";
 
 const router: Router = Router();
 
@@ -37,6 +38,12 @@ function normalizeAllowedPaths(raw: unknown): string[] {
   return raw.filter((path) => typeof path === "string" && path.trim());
 }
 
+function normalizeViewStaffLogins(raw: unknown): "all" | "own" | null {
+  if (raw === "all") return "all";
+  if (raw === "own") return "own";
+  return null;
+}
+
 router.get("/", authenticate, async (_req: AuthenticatedRequest, res: Response) => {
   try {
     await connectDB();
@@ -51,11 +58,11 @@ router.get("/", authenticate, async (_req: AuthenticatedRequest, res: Response) 
 router.post("/", authenticate, async (req: AuthenticatedRequest, res: Response) => {
   try {
     await connectDB();
-    if (req.user.role !== "admin") {
+    if (!(await isAdminOrManagerRoleName(req.user.role))) {
       return sendError(res, "Unauthorized", 403);
     }
 
-    const { name, description, allowedPaths, permissions } = req.body;
+    const { name, description, allowedPaths, permissions, viewStaffLogins, roleType } = req.body;
     if (typeof name !== "string" || !name.trim()) {
       return sendError(res, "Role name is required", 400);
     }
@@ -66,10 +73,22 @@ router.post("/", authenticate, async (req: AuthenticatedRequest, res: Response) 
       return sendError(res, "Role name already exists", 409);
     }
 
+    const normalizedRoleType = normalizeRoleType(roleType);
+    if (roleType !== undefined && normalizedRoleType === null) {
+      return sendError(res, "Invalid roleType", 400);
+    }
+
+    const normalizedViewStaffLogins = normalizeViewStaffLogins(viewStaffLogins);
+    if (viewStaffLogins !== undefined && normalizedViewStaffLogins === null) {
+      return sendError(res, "Invalid viewStaffLogins", 400);
+    }
+
     const role = await Role.create({
       name: trimmedName,
       description: typeof description === "string" ? description.trim() : "",
       allowedPaths: normalizeAllowedPaths(allowedPaths),
+      roleType: normalizedRoleType ?? "staff",
+      viewStaffLogins: normalizedViewStaffLogins ?? "own",
       permissions: normalizePermissions(permissions),
       createdBy: req.user.id,
     });
@@ -84,7 +103,7 @@ router.post("/", authenticate, async (req: AuthenticatedRequest, res: Response) 
 router.patch("/:id", authenticate, async (req: AuthenticatedRequest, res: Response) => {
   try {
     await connectDB();
-    if (req.user.role !== "admin") {
+    if (!(await isAdminOrManagerRoleName(req.user.role))) {
       return sendError(res, "Unauthorized", 403);
     }
 
@@ -94,7 +113,7 @@ router.patch("/:id", authenticate, async (req: AuthenticatedRequest, res: Respon
     const existing = await Role.findById(id);
     if (!existing) return sendError(res, "Role not found", 404);
 
-    const { name, description, allowedPaths, permissions, isDefault } = req.body;
+    const { name, description, allowedPaths, permissions, isDefault, viewStaffLogins, roleType } = req.body;
     const patch: Record<string, unknown> = {};
 
     if (name !== undefined) {
@@ -120,6 +139,18 @@ router.patch("/:id", authenticate, async (req: AuthenticatedRequest, res: Respon
       patch.permissions = normalizePermissions(permissions);
     }
 
+    if (viewStaffLogins !== undefined) {
+      const normalizedViewStaffLogins = normalizeViewStaffLogins(viewStaffLogins);
+      if (normalizedViewStaffLogins === null) return sendError(res, "Invalid viewStaffLogins", 400);
+      patch.viewStaffLogins = normalizedViewStaffLogins;
+    }
+
+    if (roleType !== undefined) {
+      const normalizedRoleType = normalizeRoleType(roleType);
+      if (normalizedRoleType === null) return sendError(res, "Invalid roleType", 400);
+      patch.roleType = normalizedRoleType;
+    }
+
     if (isDefault !== undefined) {
       patch.isDefault = Boolean(isDefault);
     }
@@ -141,7 +172,7 @@ router.patch("/:id", authenticate, async (req: AuthenticatedRequest, res: Respon
 router.delete("/:id", authenticate, async (req: AuthenticatedRequest, res: Response) => {
   try {
     await connectDB();
-    if (req.user.role !== "admin") {
+    if (!(await isAdminOrManagerRoleName(req.user.role))) {
       return sendError(res, "Unauthorized", 403);
     }
 

@@ -4,6 +4,7 @@ import { connectDB } from "../lib/mongodb";
 import { sendSuccess, sendError, generateInvoiceNumber } from "../lib/utils";
 import Invoice from "../models/Invoice";
 import Order from "../models/Order";
+import { isAdminRoleName } from "../lib/role-utils";
 import Customer from "../models/Customer";
 import { getGstRateForMethod } from "../lib/gst";
 import {
@@ -38,6 +39,9 @@ router.get("/", authenticate, async (req: AuthenticatedRequest, res: Response) =
       query.createdAt = { $gte: start, $lte: end };
     }
     if (method) query.paymentMethod = method;
+    if (!(await isAdminRoleName(req.user.role))) {
+      query.issuedBy = req.user.id;
+    }
 
     const pageNum = parseInt(page);
     const limitNum = parseInt(limit);

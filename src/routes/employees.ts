@@ -6,6 +6,7 @@ import { sendSuccess, sendError } from "../lib/utils";
 import Employee from "../models/Employee";
 import User from "../models/User";
 import Role from "../models/Role";
+import { isAdminOrManagerRoleName, isAdminRoleName } from "../lib/role-utils";
 
 const router: Router = Router();
 
@@ -112,7 +113,7 @@ function buildEmployeeUpdatePayload(
   return patch;
 }
 
-/** User account fields live on `User`, not `Employee`. Only admins may change these via PATCH. */
+/** User account fields live on `User`, not `Employee`. Admin or manager-level roles may change these via PATCH. */
 function buildUserUpdatePayload(body: Record<string, unknown>): Record<string, unknown> | { error: string } {
   const patch: Record<string, unknown> = {};
 
@@ -144,13 +145,20 @@ function buildUserUpdatePayload(body: Record<string, unknown>): Record<string, u
 router.get("/", authenticate, async (req: AuthenticatedRequest, res: Response) => {
   try {
     await connectDB();
-    if (!["admin", "manager"].includes(req.user.role)) {
-      return sendError(res, "Unauthorized", 403);
+
+    let showAll = await isAdminRoleName(req.user.role);
+    if (!showAll) {
+      const role = (await Role.findOne({ name: req.user.role }).lean()) as { viewStaffLogins?: string } | null;
+      if (role?.viewStaffLogins === "all") showAll = true;
     }
-    const employees = await Employee.find({ isActive: true })
+
+    const query = showAll ? { isActive: true } : { user: req.user.id, isActive: true };
+
+    const employees = await Employee.find(query)
       .populate("user", "name email phone role avatar")
       .sort({ createdAt: -1 })
       .lean();
+
     return sendSuccess(res, employees);
   } catch (error) {
     return sendError(res, "Failed to fetch employees", 500);
@@ -160,9 +168,25 @@ router.get("/", authenticate, async (req: AuthenticatedRequest, res: Response) =
 router.post("/", authenticate, async (req: AuthenticatedRequest, res: Response) => {
   try {
     await connectDB();
-    if (req.user.role !== "admin") return sendError(res, "Unauthorized", 403);
+    if (!(await isAdminOrManagerRoleName(req.user.role))) return sendError(res, "Unauthorized", 403);
 
     const { name, email, password, role, position, department, salary, salaryType, startDate, phone, deviceUserId } = req.body;
+
+    if (!name || typeof name !== "string" || !name.trim()) {
+      return sendError(res, "Name is required", 400);
+    }
+    if (!email || typeof email !== "string" || !email.trim()) {
+      return sendError(res, "Email is required", 400);
+    }
+    if (!password || typeof password !== "string" || password.length < 6) {
+      return sendError(res, "Password must be at least 6 characters", 400);
+    }
+    if (!position || typeof position !== "string" || !position.trim()) {
+      return sendError(res, "Position is required", 400);
+    }
+    if (!department || typeof department !== "string" || !department.trim()) {
+      return sendError(res, "Department is required", 400);
+    }
 
     const existing = await User.findOne({ email });
     if (existing) return sendError(res, "Email already registered", 409);
@@ -175,17 +199,22 @@ router.post("/", authenticate, async (req: AuthenticatedRequest, res: Response) 
     const employeeCount = await Employee.countDocuments();
     const employeeId = `EMP-${String(employeeCount + 1).padStart(4, "0")}`;
 
+    const parsedStartDate = startDate ? new Date(String(startDate)) : new Date();
+    if (Number.isNaN(parsedStartDate.getTime())) {
+      return sendError(res, "Invalid start date", 400);
+    }
+
     const user = await User.create({ name, email, password, role: selectedRole, phone });
 
     const employee = await Employee.create({
       user: user._id,
       employeeId,
       deviceUserId: deviceUserId ?? employeeId,
-      position,
-      department,
-      salary: salary || 0,
+      position: position.trim(),
+      department: department.trim(),
+      salary: typeof salary === "number" ? salary : Number(salary) || 0,
       salaryType: salaryType || "hourly",
-      startDate: new Date(startDate),
+      startDate: parsedStartDate,
     });
 
     const populated = await employee.populate("user", "name email phone role");
@@ -213,7 +242,7 @@ router.get("/:id", authenticate, async (req: AuthenticatedRequest, res: Response
 router.patch("/:id", authenticate, async (req: AuthenticatedRequest, res: Response) => {
   try {
     await connectDB();
-    if (!["admin", "manager"].includes(req.user.role)) {
+    if (!(await isAdminOrManagerRoleName(req.user.role))) {
       return sendError(res, "Unauthorized", 403);
     }
     if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
@@ -224,7 +253,7 @@ router.patch("/:id", authenticate, async (req: AuthenticatedRequest, res: Respon
     if (!employee) return sendError(res, "Employee not found", 404);
 
     const body = req.body as Record<string, unknown>;
-    const allowIsActive = req.user.role === "admin";
+    const allowIsActive = await isAdminRoleName(req.user.role);
 
     const employeePatchOrErr = buildEmployeeUpdatePayload(body, allowIsActive);
     if (isPatchBuildError(employeePatchOrErr)) {
@@ -233,7 +262,7 @@ router.patch("/:id", authenticate, async (req: AuthenticatedRequest, res: Respon
     const employeePatch = employeePatchOrErr;
 
     let userPatch: Record<string, unknown> = {};
-    if (req.user.role === "admin") {
+    if (await isAdminOrManagerRoleName(req.user.role)) {
       const userPatchOrErr = buildUserUpdatePayload(body);
       if (isPatchBuildError(userPatchOrErr)) {
         return sendError(res, userPatchOrErr.error, 400);
@@ -290,7 +319,7 @@ router.patch("/:id", authenticate, async (req: AuthenticatedRequest, res: Respon
 router.delete("/:id", authenticate, async (req: AuthenticatedRequest, res: Response) => {
   try {
     await connectDB();
-    if (req.user.role !== "admin") return sendError(res, "Unauthorized", 403);
+    if (!(await isAdminRoleName(req.user.role))) return sendError(res, "Unauthorized", 403);
     if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
       return sendError(res, "Invalid employee id", 400);
     }

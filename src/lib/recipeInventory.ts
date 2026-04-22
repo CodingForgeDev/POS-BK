@@ -190,6 +190,10 @@ export type BillingRecipeInput = {
   discountType?: string;
   discountValue?: number;
   notes?: string;
+  paymentAccountName?: string;
+  paymentAccountDiscountType?: string;
+  paymentAccountDiscountValue?: number;
+  paymentAccountDiscountAmount?: number;
   gstRatePct: number;
   invoiceNumber: string;
   discountAmount: number;
@@ -207,6 +211,10 @@ async function runBillingInSession(s: ClientSession | null, input: BillingRecipe
     discountType,
     discountValue,
     notes,
+    paymentAccountName,
+    paymentAccountDiscountType,
+    paymentAccountDiscountValue,
+    paymentAccountDiscountAmount,
     gstRatePct,
     invoiceNumber,
     discountAmount,
@@ -294,6 +302,10 @@ async function runBillingInSession(s: ClientSession | null, input: BillingRecipe
         discountValue: discountValue || 0,
         discountAmount,
         serviceChargeAmount,
+        paymentAccountName: String(paymentAccountName ?? ""),
+        paymentAccountDiscountType: paymentAccountDiscountType || "none",
+        paymentAccountDiscountValue: paymentAccountDiscountValue || 0,
+        paymentAccountDiscountAmount: paymentAccountDiscountAmount || 0,
         total,
         paymentMethod,
         amountPaid,

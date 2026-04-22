@@ -12,11 +12,19 @@ import {
   InsufficientStockError,
 } from "../lib/recipeInventory";
 
-function invoiceTotalsFromOrder(order: any, gstRatePct: number) {
+function invoiceTotalsFromOrder(order: any, gstRatePct: number, paymentAccountDiscountAmount: number = 0) {
   const discountAmount = order.discountAmount || 0;
-  const afterDiscount = Math.max(0, order.subtotal - discountAmount);
   const serviceChargeAmount = Number(order.serviceChargeAmount) || 0;
-  const taxableBase = afterDiscount + serviceChargeAmount;
+  const existingTaxAmount = Number(order.taxAmount) || 0;
+  const existingTotal = Number(order.total) || 0;
+
+  if (Number.isFinite(existingTotal) && existingTotal > 0) {
+    const total = Math.max(0, existingTotal - Math.max(0, paymentAccountDiscountAmount));
+    return { discountAmount, serviceChargeAmount, taxAmount: existingTaxAmount, total };
+  }
+
+  const afterDiscount = Math.max(0, order.subtotal - discountAmount);
+  const taxableBase = Math.max(0, afterDiscount + serviceChargeAmount - Math.max(0, paymentAccountDiscountAmount));
   const rate = Math.max(0, Math.min(100, gstRatePct));
   const taxAmount = (taxableBase * rate) / 100;
   const total = taxableBase + taxAmount;
@@ -69,7 +77,18 @@ router.get("/", authenticate, async (req: AuthenticatedRequest, res: Response) =
 router.post("/", authenticate, async (req: AuthenticatedRequest, res: Response) => {
   try {
     await connectDB();
-    const { orderId, paymentMethod, amountPaid, discountType, discountValue, notes } = req.body;
+    const {
+      orderId,
+      paymentMethod,
+      amountPaid,
+      discountType,
+      discountValue,
+      notes,
+      paymentAccountName,
+      paymentAccountDiscountType,
+      paymentAccountDiscountValue,
+      paymentAccountDiscountAmount,
+    } = req.body;
 
     const normalizedOrderId = String(orderId ?? "").trim();
     if (!normalizedOrderId) {
@@ -90,6 +109,11 @@ router.post("/", authenticate, async (req: AuthenticatedRequest, res: Response) 
       ? String(discountType)
       : "none";
     const discountValueNumber = Number(discountValue ?? 0);
+    const paymentAccountDiscountTypeValue = ["percentage", "fixed", "none"].includes(String(paymentAccountDiscountType ?? ""))
+      ? String(paymentAccountDiscountType)
+      : "none";
+    const paymentAccountDiscountValueNumber = Number(paymentAccountDiscountValue ?? 0);
+    const paymentAccountDiscountAmountValue = Number(paymentAccountDiscountAmount ?? 0);
 
     const order = await Order.findById(normalizedOrderId);
     if (!order) return sendError(res, "Order not found", 404);
@@ -98,7 +122,8 @@ router.post("/", authenticate, async (req: AuthenticatedRequest, res: Response) 
     const gstRatePct = await getGstRateForMethod(paymentMethodValue);
     const { discountAmount, serviceChargeAmount, taxAmount, total } = invoiceTotalsFromOrder(
       order,
-      gstRatePct
+      gstRatePct,
+      paymentAccountDiscountAmountValue
     );
 
     let invoice;
@@ -112,6 +137,10 @@ router.post("/", authenticate, async (req: AuthenticatedRequest, res: Response) 
         discountType: discountTypeValue,
         discountValue: Number.isFinite(discountValueNumber) ? discountValueNumber : 0,
         notes: String(notes ?? ""),
+        paymentAccountName: String(paymentAccountName ?? ""),
+        paymentAccountDiscountType: paymentAccountDiscountTypeValue,
+        paymentAccountDiscountValue: Number.isFinite(paymentAccountDiscountValueNumber) ? paymentAccountDiscountValueNumber : 0,
+        paymentAccountDiscountAmount: Number.isFinite(paymentAccountDiscountAmountValue) ? paymentAccountDiscountAmountValue : 0,
         gstRatePct,
         invoiceNumber,
         discountAmount,
@@ -133,6 +162,10 @@ router.post("/", authenticate, async (req: AuthenticatedRequest, res: Response) 
           discountType: discountTypeValue,
           discountValue: Number.isFinite(discountValueNumber) ? discountValueNumber : 0,
           notes: String(notes ?? ""),
+          paymentAccountName: String(paymentAccountName ?? ""),
+          paymentAccountDiscountType: paymentAccountDiscountTypeValue,
+          paymentAccountDiscountValue: Number.isFinite(paymentAccountDiscountValueNumber) ? paymentAccountDiscountValueNumber : 0,
+          paymentAccountDiscountAmount: Number.isFinite(paymentAccountDiscountAmountValue) ? paymentAccountDiscountAmountValue : 0,
           gstRatePct,
           invoiceNumber: retryInvoiceNumber,
           discountAmount,

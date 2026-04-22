@@ -28,6 +28,10 @@ const InvoiceSchema = new mongoose.Schema(
       enum: ["cash", "card", "debit_card", "credit_card", "gsb_card", "digital", "split"],
       required: true,
     },
+    paymentAccountName: { type: String, default: "" },
+    paymentAccountDiscountType: { type: String, enum: ["percentage", "fixed", "none"], default: "none" },
+    paymentAccountDiscountValue: { type: Number, default: 0 },
+    paymentAccountDiscountAmount: { type: Number, default: 0 },
     amountPaid: { type: Number, required: true },
     changeGiven: { type: Number, default: 0 },
     status: {

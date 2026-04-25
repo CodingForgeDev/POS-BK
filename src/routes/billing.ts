@@ -1,10 +1,11 @@
+import mongoose from "mongoose";
 import { Router, Response } from "express";
 import { authenticate, AuthenticatedRequest } from "../middleware/auth";
 import { connectDB } from "../lib/mongodb";
 import { sendSuccess, sendError, generateInvoiceNumber } from "../lib/utils";
 import Invoice from "../models/Invoice";
 import Order from "../models/Order";
-import { isAdminRoleName } from "../lib/role-utils";
+import { isAdminOrManagerRoleName } from "../lib/role-utils";
 import Customer from "../models/Customer";
 import { getGstRateForMethod } from "../lib/gst";
 import {
@@ -12,7 +13,49 @@ import {
   InsufficientStockError,
 } from "../lib/recipeInventory";
 
-function invoiceTotalsFromOrder(order: any, gstRatePct: number, paymentAccountDiscountAmount: number = 0) {
+// ─── Helpers ─────────────────────────────────────────────────────────────────
+
+/**
+ * Returns true when refundRequest is a Mongoose-generated ghost object:
+ * an auto-initialized sub-doc that has no real data (no requestedBy, no items,
+ * no meaningful notes). We treat these as null so they never block real requests.
+ *
+ * Handles all edge cases:
+ *   - actual null / undefined
+ *   - empty object {}
+ *   - sub-doc with only schema defaults filled in
+ */
+function isGhostRefundRequest(r: any): boolean {
+  if (r == null) return true;
+  if (typeof r !== "object") return true;
+
+  // If there's a real requestedBy, it's a genuine request
+  if (r.requestedBy) return false;
+
+  // If status is anything other than "pending" with no requester, trust it
+  if (r.status && r.status !== "pending") return false;
+
+  // Ghost: pending with no actor, no timestamp, no real items, no notes
+  const hasItems = Array.isArray(r.items) && r.items.length > 0;
+  const hasNotes = typeof r.notes === "string" && r.notes.trim().length > 0;
+  const hasTimestamp = Boolean(r.requestedAt);
+
+  return !hasItems && !hasNotes && !hasTimestamp;
+}
+
+function sanitizeInvoice(invoice: any) {
+  if (!invoice) return invoice;
+  if (isGhostRefundRequest(invoice.refundRequest)) {
+    invoice.refundRequest = null;
+  }
+  return invoice;
+}
+
+function invoiceTotalsFromOrder(
+  order: any,
+  gstRatePct: number,
+  paymentAccountDiscountAmount = 0
+) {
   const discountAmount = order.discountAmount || 0;
   const serviceChargeAmount = Number(order.serviceChargeAmount) || 0;
   const existingTaxAmount = Number(order.taxAmount) || 0;
@@ -24,15 +67,40 @@ function invoiceTotalsFromOrder(order: any, gstRatePct: number, paymentAccountDi
   }
 
   const afterDiscount = Math.max(0, order.subtotal - discountAmount);
-  const taxableBase = Math.max(0, afterDiscount + serviceChargeAmount - Math.max(0, paymentAccountDiscountAmount));
+  const taxableBase = Math.max(
+    0,
+    afterDiscount + serviceChargeAmount - Math.max(0, paymentAccountDiscountAmount)
+  );
   const rate = Math.max(0, Math.min(100, gstRatePct));
   const taxAmount = (taxableBase * rate) / 100;
   const total = taxableBase + taxAmount;
   return { discountAmount, serviceChargeAmount, taxAmount, total };
 }
 
+const FULL_POPULATE = [
+  { path: "issuedBy", select: "name" },
+  {
+    path: "order",
+    select: "orderNumber type tableNumber",
+    populate: { path: "servedBy", select: "name" },
+  },
+  { path: "customer", select: "name phone" },
+  { path: "refundedBy", select: "name" },
+  { path: "refundRequest.requestedBy", select: "name" },
+  { path: "refundRequest.approvedBy", select: "name" },
+  { path: "refundRequest.rejectedBy", select: "name" },
+];
+
+async function fetchPopulatedInvoice(id: any) {
+  const doc = await Invoice.findById(id).populate(FULL_POPULATE as any).lean();
+  return sanitizeInvoice(doc);
+}
+
+// ─── Router ──────────────────────────────────────────────────────────────────
+
 const router: Router = Router();
 
+// GET /billing
 router.get("/", authenticate, async (req: AuthenticatedRequest, res: Response) => {
   try {
     await connectDB();
@@ -47,15 +115,14 @@ router.get("/", authenticate, async (req: AuthenticatedRequest, res: Response) =
       query.createdAt = { $gte: start, $lte: end };
     }
     if (method) query.paymentMethod = method;
-    if (!(await isAdminRoleName(req.user.role))) {
+    if (!(await isAdminOrManagerRoleName(req.user.role))) {
       query.issuedBy = req.user.id;
     }
 
     const pageNum = parseInt(page);
     const limitNum = parseInt(limit);
-
     const total = await Invoice.countDocuments(query);
-    const invoices = await Invoice.find(query)
+    let invoices = await Invoice.find(query)
       .populate("issuedBy", "name")
       .populate({
         path: "order",
@@ -68,12 +135,413 @@ router.get("/", authenticate, async (req: AuthenticatedRequest, res: Response) =
       .limit(limitNum)
       .lean();
 
+    invoices = invoices.map(sanitizeInvoice);
     return sendSuccess(res, { invoices, total, page: pageNum, limit: limitNum });
   } catch (error) {
+    console.error("[GET /billing]", error);
     return sendError(res, "Failed to fetch invoices", 500);
   }
 });
 
+// GET /billing/refund-requests
+router.get("/refund-requests", authenticate, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    await connectDB();
+    if (!(await isAdminOrManagerRoleName(req.user.role))) {
+      return sendError(res, "Unauthorized", 403);
+    }
+
+    const { status = "pending", page = "1", limit = "20", startDate, endDate } = req.query as Record<string, string>;
+    const allowedStatuses = ["pending", "approved", "rejected", "all"];
+    const normalizedStatus = allowedStatuses.includes(status) ? status : "pending";
+
+    const query: any = { "refundRequest.requestedBy": { $ne: null } };
+    if (normalizedStatus !== "all") {
+      query["refundRequest.status"] = normalizedStatus;
+    }
+
+    const requestedAtFilter: any = {};
+    if (startDate) {
+      const start = new Date(startDate);
+      start.setHours(0, 0, 0, 0);
+      if (!Number.isNaN(start.getTime())) {
+        requestedAtFilter.$gte = start;
+      }
+    }
+    if (endDate) {
+      const end = new Date(endDate);
+      end.setHours(23, 59, 59, 999);
+      if (!Number.isNaN(end.getTime())) {
+        requestedAtFilter.$lte = end;
+      }
+    }
+    if (Object.keys(requestedAtFilter).length) {
+      query["refundRequest.requestedAt"] = requestedAtFilter;
+    }
+
+    const pageNum = parseInt(page);
+    const limitNum = parseInt(limit);
+    const total = await Invoice.countDocuments(query);
+    const invoices = await Invoice.find(query)
+      .populate("issuedBy", "name")
+      .populate({
+        path: "order",
+        select: "orderNumber type tableNumber",
+        populate: { path: "servedBy", select: "name" },
+      })
+      .populate("customer", "name phone")
+      .populate("refundRequest.requestedBy", "name")
+      .populate("refundRequest.approvedBy", "name")
+      .populate("refundRequest.rejectedBy", "name")
+      .sort({ "refundRequest.requestedAt": -1 })
+      .skip((pageNum - 1) * limitNum)
+      .limit(limitNum)
+      .lean();
+
+    return sendSuccess(res, { invoices, total, page: pageNum, limit: limitNum });
+  } catch (error) {
+    console.error("[GET /billing/refund-requests]", error);
+    return sendError(res, "Failed to fetch refund requests", 500);
+  }
+});
+
+// GET /billing/:id
+router.get("/:id", authenticate, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    await connectDB();
+    const { id } = req.params;
+    if (!id || !mongoose.isValidObjectId(id)) {
+      return sendError(res, "Invalid invoice ID", 400);
+    }
+
+    const invoice = await fetchPopulatedInvoice(id);
+    if (!invoice) return sendError(res, "Invoice not found", 404);
+
+    const issuedById =
+      typeof invoice.issuedBy === "object"
+        ? String((invoice.issuedBy as any)?._id)
+        : String(invoice.issuedBy);
+
+    if (
+      !(await isAdminOrManagerRoleName(req.user.role)) &&
+      issuedById !== req.user.id
+    ) {
+      return sendError(res, "Not authorized to view this invoice", 403);
+    }
+
+    return sendSuccess(res, invoice);
+  } catch (error) {
+    console.error("[GET /billing/:id]", error);
+    return sendError(res, "Failed to fetch invoice", 500);
+  }
+});
+
+
+
+
+
+
+
+// POST /billing/:id/refund-requests — cashier submits refund request for approval
+// POST /billing/:id/refund-requests
+// Replace ONLY this route handler in your invoices router.
+// The fix: use findByIdAndUpdate with $set instead of document.save(),
+// which skips full-document validation (we only need to validate the new fields).
+
+router.post(
+  "/:id/refund-requests",
+  authenticate,
+  async (req: AuthenticatedRequest, res: Response) => {
+    try {
+      await connectDB();
+      const { id } = req.params;
+
+      // ── Input validation ─────────────────────────────────────────────────
+      if (!id || !mongoose.isValidObjectId(id)) {
+        return sendError(res, "Invalid invoice ID", 400);
+      }
+
+      const notes = String(req.body.notes ?? "").trim();
+      if (!notes) {
+        return sendError(res, "Refund reason is required", 400);
+      }
+
+      const rawItems = Array.isArray(req.body.items) ? req.body.items : [];
+      if (!rawItems.length) {
+        return sendError(res, "Select at least one item to refund", 400);
+      }
+
+      // ── Load invoice ─────────────────────────────────────────────────────
+      const invoice = await Invoice.findById(id).lean() as any;
+      if (!invoice) return sendError(res, "Invoice not found", 404);
+
+      if (invoice.status === "refunded") {
+        return sendError(res, "Invoice is already fully refunded", 400);
+      }
+
+      // ── Ghost-request guard ──────────────────────────────────────────────
+      const isGhost = isGhostRefundRequest(invoice.refundRequest);
+      if (!isGhost && invoice.refundRequest?.status === "pending") {
+        return sendError(res, "A refund request is already pending for this invoice", 409);
+      }
+
+      // ── Build & validate items ───────────────────────────────────────────
+      const invoiceItemMap = new Map<string, { quantity: number; price: number }>(
+        (invoice.items || []).map((i: any) => [
+          String(i.name || "").toLowerCase().trim(),
+          { quantity: Number(i.quantity), price: Number(i.price) },
+        ])
+      );
+
+      const validItems: Array<{
+        name: string;
+        quantity: number;
+        price: number;
+        refundQuantity: number;
+        refundAmount: number;
+      }> = [];
+
+      for (const item of rawItems) {
+        if (!item || !item.name) continue;
+
+        const name = String(item.name).trim();
+        const refundQuantity = Math.floor(Number(item.refundQuantity) || 0);
+        if (refundQuantity <= 0) continue;
+
+        const original = invoiceItemMap.get(name.toLowerCase());
+        if (!original) {
+          return sendError(res, `Item "${name}" does not exist in this invoice`, 422);
+        }
+        if (refundQuantity > original.quantity) {
+          return sendError(
+            res,
+            `Refund quantity for "${name}" (${refundQuantity}) exceeds original quantity (${original.quantity})`,
+            422
+          );
+        }
+
+        const price = Number(item.price) > 0 ? Number(item.price) : original.price;
+        const refundAmount = Math.round(refundQuantity * price * 100) / 100;
+
+        validItems.push({
+          name,
+          quantity: refundQuantity,
+          price,
+          refundQuantity,
+          refundAmount,
+        });
+      }
+
+      if (!validItems.length) {
+        return sendError(res, "Select at least one valid item to refund", 400);
+      }
+
+      // ── Persist using $set to skip full-document re-validation ───────────
+      // invoice.save() re-validates ALL fields including items[].total which
+      // may be missing on old documents. findByIdAndUpdate only touches the
+      // fields we explicitly set, so old item data is never re-validated.
+      const refundRequestPayload = {
+        requestedBy: req.user.id,
+        requestedAt: new Date(),
+        notes,
+        items: validItems,
+        status: "pending",
+        approvedBy: null,
+        approvedAt: null,
+        approvalNotes: "",
+        rejectedBy: null,
+        rejectedAt: null,
+        rejectionNotes: "",
+      };
+
+      await Invoice.findByIdAndUpdate(
+        id,
+        { $set: { refundRequest: refundRequestPayload } },
+        { runValidators: false } // skip full-doc validation
+      );
+
+      return sendSuccess(
+        res,
+        await fetchPopulatedInvoice(id),
+        "Refund request submitted successfully",
+        201
+      );
+    } catch (error: any) {
+      console.error("[POST /billing/:id/refund-requests] ERROR:", {
+        message: error?.message,
+        name: error?.name,
+        code: error?.code,
+      });
+      return sendError(res, "Failed to submit refund request", 500);
+    }
+  }
+);
+
+// Also apply the same $set pattern to approve and reject:
+
+router.post(
+  "/refund-requests/:id/approve",
+  authenticate,
+  async (req: AuthenticatedRequest, res: Response) => {
+    try {
+      await connectDB();
+      if (!(await isAdminOrManagerRoleName(req.user.role))) {
+        return sendError(res, "Unauthorized", 403);
+      }
+
+      const { id } = req.params;
+      if (!id || !mongoose.isValidObjectId(id)) {
+        return sendError(res, "Invalid invoice ID", 400);
+      }
+
+      const notes = String(req.body.notes ?? "").trim();
+      if (!notes) return sendError(res, "Approval notes are required", 400);
+
+      const invoice = await Invoice.findById(id).lean() as any;
+      if (!invoice) return sendError(res, "Invoice not found", 404);
+
+      if (isGhostRefundRequest(invoice.refundRequest)) {
+        return sendError(res, "No pending refund request found", 400);
+      }
+      if (invoice.refundRequest?.status !== "pending") {
+        return sendError(res, "No pending refund request found", 400);
+      }
+
+      const approvedAmount = (invoice.refundRequest.items || []).reduce(
+        (sum: number, item: any) => sum + Number(item.refundAmount || 0),
+        0
+      );
+
+      const newStatus = approvedAmount >= invoice.total ? "refunded" : "partial";
+
+      await Invoice.findByIdAndUpdate(
+        id,
+        {
+          $set: {
+            refundAmount: approvedAmount,
+            status: newStatus,
+            refundedAt: new Date(),
+            refundedBy: req.user.id,
+            refundNotes: notes,
+            "refundRequest.status": "approved",
+            "refundRequest.approvedBy": req.user.id,
+            "refundRequest.approvedAt": new Date(),
+            "refundRequest.approvalNotes": notes,
+          },
+        },
+        { runValidators: false }
+      );
+
+      return sendSuccess(
+        res,
+        await fetchPopulatedInvoice(id),
+        "Refund approved successfully"
+      );
+    } catch (error) {
+      console.error("[POST /billing/refund-requests/:id/approve]", error);
+      return sendError(res, "Failed to approve refund", 500);
+    }
+  }
+);
+
+router.post(
+  "/refund-requests/:id/reject",
+  authenticate,
+  async (req: AuthenticatedRequest, res: Response) => {
+    try {
+      await connectDB();
+      if (!(await isAdminOrManagerRoleName(req.user.role))) {
+        return sendError(res, "Unauthorized", 403);
+      }
+
+      const { id } = req.params;
+      if (!id || !mongoose.isValidObjectId(id)) {
+        return sendError(res, "Invalid invoice ID", 400);
+      }
+
+      const notes = String(req.body.notes ?? "").trim();
+      if (!notes) return sendError(res, "Rejection reason is required", 400);
+
+      const invoice = await Invoice.findById(id).lean() as any;
+      if (!invoice) return sendError(res, "Invoice not found", 404);
+
+      if (isGhostRefundRequest(invoice.refundRequest)) {
+        return sendError(res, "No pending refund request found", 400);
+      }
+      if (invoice.refundRequest?.status !== "pending") {
+        return sendError(res, "No pending refund request found", 400);
+      }
+
+      await Invoice.findByIdAndUpdate(
+        id,
+        {
+          $set: {
+            "refundRequest.status": "rejected",
+            "refundRequest.rejectedBy": req.user.id,
+            "refundRequest.rejectedAt": new Date(),
+            "refundRequest.rejectionNotes": notes,
+          },
+        },
+        { runValidators: false }
+      );
+
+      return sendSuccess(
+        res,
+        await fetchPopulatedInvoice(id),
+        "Refund request rejected"
+      );
+    } catch (error) {
+      console.error("[POST /billing/refund-requests/:id/reject]", error);
+      return sendError(res, "Failed to reject refund request", 500);
+    }
+  }
+);
+
+// POST /billing/:id/refund — direct full refund (admin/manager only, bypasses request flow)
+router.post(
+  "/:id/refund",
+  authenticate,
+  async (req: AuthenticatedRequest, res: Response) => {
+    try {
+      await connectDB();
+      const { id } = req.params;
+      if (!id || !mongoose.isValidObjectId(id)) {
+        return sendError(res, "Invalid invoice ID", 400);
+      }
+
+      const notes = String(req.body.notes ?? "").trim();
+      if (!notes) return sendError(res, "Refund notes are required", 400);
+
+      if (!(await isAdminOrManagerRoleName(req.user.role))) {
+        return sendError(res, "Unauthorized", 403);
+      }
+
+      const invoice = await Invoice.findById(id);
+      if (!invoice) return sendError(res, "Invoice not found", 404);
+      if (invoice.status === "refunded") {
+        return sendError(res, "Invoice already refunded", 400);
+      }
+
+      invoice.status = "refunded";
+      invoice.refundAmount = invoice.total;
+      invoice.refundNotes = notes;
+      invoice.refundedAt = new Date();
+      invoice.refundedBy = req.user.id;
+      await invoice.save();
+
+      return sendSuccess(
+        res,
+        await fetchPopulatedInvoice(invoice._id),
+        "Invoice refunded successfully"
+      );
+    } catch (error) {
+      console.error("[POST /billing/:id/refund]", error);
+      return sendError(res, "Failed to refund invoice", 500);
+    }
+  }
+);
+
+// POST /billing — create invoice
 router.post("/", authenticate, async (req: AuthenticatedRequest, res: Response) => {
   try {
     await connectDB();
@@ -91,14 +559,10 @@ router.post("/", authenticate, async (req: AuthenticatedRequest, res: Response) 
     } = req.body;
 
     const normalizedOrderId = String(orderId ?? "").trim();
-    if (!normalizedOrderId) {
-      return sendError(res, "Order ID is required", 400);
-    }
+    if (!normalizedOrderId) return sendError(res, "Order ID is required", 400);
 
     const paymentMethodValue = String(paymentMethod ?? "").trim();
-    if (!paymentMethodValue) {
-      return sendError(res, "Payment method is required", 400);
-    }
+    if (!paymentMethodValue) return sendError(res, "Payment method is required", 400);
 
     const amountPaidValue = Number(amountPaid);
     if (!Number.isFinite(amountPaidValue) || amountPaidValue < 0) {
@@ -109,7 +573,9 @@ router.post("/", authenticate, async (req: AuthenticatedRequest, res: Response) 
       ? String(discountType)
       : "none";
     const discountValueNumber = Number(discountValue ?? 0);
-    const paymentAccountDiscountTypeValue = ["percentage", "fixed", "none"].includes(String(paymentAccountDiscountType ?? ""))
+    const paymentAccountDiscountTypeValue = ["percentage", "fixed", "none"].includes(
+      String(paymentAccountDiscountType ?? "")
+    )
       ? String(paymentAccountDiscountType)
       : "none";
     const paymentAccountDiscountValueNumber = Number(paymentAccountDiscountValue ?? 0);
@@ -126,52 +592,42 @@ router.post("/", authenticate, async (req: AuthenticatedRequest, res: Response) 
       paymentAccountDiscountAmountValue
     );
 
-    let invoice;
+    const billingBase = {
+      orderId: normalizedOrderId,
+      userId: req.user.id,
+      paymentMethod: paymentMethodValue,
+      amountPaid: amountPaidValue,
+      discountType: discountTypeValue,
+      discountValue: Number.isFinite(discountValueNumber) ? discountValueNumber : 0,
+      notes: String(notes ?? ""),
+      paymentAccountName: String(paymentAccountName ?? ""),
+      paymentAccountDiscountType: paymentAccountDiscountTypeValue,
+      paymentAccountDiscountValue: Number.isFinite(paymentAccountDiscountValueNumber)
+        ? paymentAccountDiscountValueNumber
+        : 0,
+      paymentAccountDiscountAmount: Number.isFinite(paymentAccountDiscountAmountValue)
+        ? paymentAccountDiscountAmountValue
+        : 0,
+      gstRatePct,
+      discountAmount,
+      serviceChargeAmount,
+      taxAmount,
+      total,
+    };
+
+    let invoice: any;
     try {
       const invoiceNumber = await generateInvoiceNumber();
-      const result = await executeBillingWithRecipeConsumption({
-        orderId: normalizedOrderId,
-        userId: req.user.id,
-        paymentMethod: paymentMethodValue,
-        amountPaid: amountPaidValue,
-        discountType: discountTypeValue,
-        discountValue: Number.isFinite(discountValueNumber) ? discountValueNumber : 0,
-        notes: String(notes ?? ""),
-        paymentAccountName: String(paymentAccountName ?? ""),
-        paymentAccountDiscountType: paymentAccountDiscountTypeValue,
-        paymentAccountDiscountValue: Number.isFinite(paymentAccountDiscountValueNumber) ? paymentAccountDiscountValueNumber : 0,
-        paymentAccountDiscountAmount: Number.isFinite(paymentAccountDiscountAmountValue) ? paymentAccountDiscountAmountValue : 0,
-        gstRatePct,
-        invoiceNumber,
-        discountAmount,
-        serviceChargeAmount,
-        taxAmount,
-        total,
-      });
+      const result = await executeBillingWithRecipeConsumption({ ...billingBase, invoiceNumber });
       invoice = result.invoice;
     } catch (e: unknown) {
-      const isInvoiceNumberDuplicate =
+      const isDuplicate =
         e instanceof Error && /E11000 duplicate key error.*invoiceNumber/i.test(e.message);
-      if (isInvoiceNumberDuplicate) {
-        const retryInvoiceNumber = await generateInvoiceNumber();
+      if (isDuplicate) {
+        const retryNumber = await generateInvoiceNumber();
         const retryResult = await executeBillingWithRecipeConsumption({
-          orderId: normalizedOrderId,
-          userId: req.user.id,
-          paymentMethod: paymentMethodValue,
-          amountPaid: amountPaidValue,
-          discountType: discountTypeValue,
-          discountValue: Number.isFinite(discountValueNumber) ? discountValueNumber : 0,
-          notes: String(notes ?? ""),
-          paymentAccountName: String(paymentAccountName ?? ""),
-          paymentAccountDiscountType: paymentAccountDiscountTypeValue,
-          paymentAccountDiscountValue: Number.isFinite(paymentAccountDiscountValueNumber) ? paymentAccountDiscountValueNumber : 0,
-          paymentAccountDiscountAmount: Number.isFinite(paymentAccountDiscountAmountValue) ? paymentAccountDiscountAmountValue : 0,
-          gstRatePct,
-          invoiceNumber: retryInvoiceNumber,
-          discountAmount,
-          serviceChargeAmount,
-          taxAmount,
-          total,
+          ...billingBase,
+          invoiceNumber: retryNumber,
         });
         invoice = retryResult.invoice;
       } else {
@@ -197,19 +653,16 @@ router.post("/", authenticate, async (req: AuthenticatedRequest, res: Response) 
       });
     }
 
-    const populated = await Invoice.findById(invoice._id)
-      .populate("issuedBy", "name")
-      .populate({
-        path: "order",
-        select: "orderNumber type tableNumber",
-        populate: { path: "servedBy", select: "name" },
-      })
-      .populate("customer", "name phone");
-
-    return sendSuccess(res, populated, "Invoice created successfully", 201);
+    return sendSuccess(
+      res,
+      await fetchPopulatedInvoice(invoice._id),
+      "Invoice created successfully",
+      201
+    );
   } catch (error) {
-    const message = error instanceof Error ? error.message || "Failed to create invoice" : "Failed to create invoice";
-    console.error("Billing error:", error);
+    const message =
+      error instanceof Error ? error.message || "Failed to create invoice" : "Failed to create invoice";
+    console.error("[POST /billing]", error);
     return sendError(res, message, 500);
   }
 });

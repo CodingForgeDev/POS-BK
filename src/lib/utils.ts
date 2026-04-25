@@ -51,7 +51,12 @@ async function getNextSequence(id: string, startAt = 1): Promise<number> {
 
   let current = Number(counter?.seq ?? startAt);
   if (current < startAt) {
-    current = startAt;
+    const updated = await SequenceCounter.findOneAndUpdate(
+      { _id: id },
+      { seq: startAt },
+      { returnDocument: "after" }
+    ).lean();
+    current = Number(updated?.seq ?? startAt);
   }
 
   if (id.startsWith("ORD-") && current >= 100000) {

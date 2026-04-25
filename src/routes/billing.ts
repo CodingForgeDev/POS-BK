@@ -104,10 +104,16 @@ const router: Router = Router();
 router.get("/", authenticate, async (req: AuthenticatedRequest, res: Response) => {
   try {
     await connectDB();
-    const { page = "1", limit = "20", date, method } = req.query as Record<string, string>;
+    const { page = "1", limit = "20", date, startDate, endDate, method } = req.query as Record<string, string>;
 
     const query: any = {};
-    if (date) {
+    if (startDate || endDate) {
+      const start = new Date(startDate || endDate || date);
+      start.setHours(0, 0, 0, 0);
+      const end = new Date(endDate || startDate || date);
+      end.setHours(23, 59, 59, 999);
+      query.createdAt = { $gte: start, $lte: end };
+    } else if (date) {
       const start = new Date(date);
       start.setHours(0, 0, 0, 0);
       const end = new Date(date);
@@ -616,35 +622,36 @@ router.post("/", authenticate, async (req: AuthenticatedRequest, res: Response) 
     };
 
     let invoice: any;
-    try {
-      const invoiceNumber = await generateInvoiceNumber();
-      const result = await executeBillingWithRecipeConsumption({ ...billingBase, invoiceNumber });
-      invoice = result.invoice;
-    } catch (e: unknown) {
-      const isDuplicate =
-        e instanceof Error && /E11000 duplicate key error.*invoiceNumber/i.test(e.message);
-      if (isDuplicate) {
-        const retryNumber = await generateInvoiceNumber();
-        const retryResult = await executeBillingWithRecipeConsumption({
-          ...billingBase,
-          invoiceNumber: retryNumber,
-        });
-        invoice = retryResult.invoice;
-      } else {
-        if (e instanceof InsufficientStockError) {
-          return sendError(res, e.message, 409, { code: e.code, shortages: e.shortages });
+    let lastError: unknown;
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      try {
+        const invoiceNumber = await generateInvoiceNumber();
+        const result = await executeBillingWithRecipeConsumption({ ...billingBase, invoiceNumber });
+        invoice = result.invoice;
+        break;
+      } catch (e: unknown) {
+        lastError = e;
+        const isDuplicate =
+          e instanceof Error && /E11000 duplicate key error.*invoiceNumber/i.test(e.message);
+        if (!isDuplicate) {
+          if (e instanceof InsufficientStockError) {
+            return sendError(res, e.message, 409, { code: e.code, shortages: e.shortages });
+          }
+          if (e instanceof Error && e.message.includes("MongoDB transactions require")) {
+            return sendError(res, e.message, 503);
+          }
+          if (e instanceof Error && e.message === "ORDER_NOT_FOUND") {
+            return sendError(res, "Order not found", 404);
+          }
+          if (e instanceof Error && e.message === "ORDER_ALREADY_BILLED") {
+            return sendError(res, "Order already billed", 400);
+          }
+          throw e;
         }
-        if (e instanceof Error && e.message.includes("MongoDB transactions require")) {
-          return sendError(res, e.message, 503);
-        }
-        if (e instanceof Error && e.message === "ORDER_NOT_FOUND") {
-          return sendError(res, "Order not found", 404);
-        }
-        if (e instanceof Error && e.message === "ORDER_ALREADY_BILLED") {
-          return sendError(res, "Order already billed", 400);
-        }
-        throw e;
       }
+    }
+    if (!invoice) {
+      throw lastError ?? new Error("Failed to create invoice");
     }
 
     if (order.customer) {

@@ -115,7 +115,7 @@ export async function recalculateProductCostPriceForInventoryItem(
 
 export { INSUFFICIENT_STOCK, InsufficientStockError, type ShortageDetail } from "./inventoryErrors";
 
-export type OrderItemLike = { product: mongoose.Types.ObjectId; quantity: number };
+export type OrderItemLike = { product: mongoose.Types.ObjectId; quantity: number; isReadyItem?: boolean };
 
 function normalizeProductRef(product: unknown): mongoose.Types.ObjectId {
   if (product && typeof product === "object" && (product as { _id?: unknown })._id) {
@@ -128,15 +128,18 @@ function normalizeProductRef(product: unknown): mongoose.Types.ObjectId {
  * Sum inventory needs for all order lines from product recipeLines (per-unit × line quantity).
  */
 export async function aggregateRecipeRequirements(
-  orderItems: Array<{ product: unknown; quantity: number }>,
+  orderItems: Array<{ product: unknown; quantity: number; isReadyItem?: unknown }>,
   session?: ClientSession | null
 ): Promise<Map<string, number>> {
   if (!orderItems?.length) return new Map();
 
-  const normalized = orderItems.map((i) => ({
-    product: normalizeProductRef(i.product),
-    quantity: Number(i.quantity) || 0,
-  }));
+  const normalized = orderItems
+    .filter((i) => !Boolean((i as { isReadyItem?: unknown }).isReadyItem))
+    .map((i) => ({
+      product: normalizeProductRef(i.product),
+      quantity: Number(i.quantity) || 0,
+    }))
+    .filter((item) => item.quantity > 0);
 
   const productIds = [...new Set(normalized.map((i) => i.product.toString()))];
   const q = Product.find({ _id: { $in: productIds } }).select("recipeLines").lean();

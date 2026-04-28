@@ -16,11 +16,12 @@ export type FifoAllocation = {
 export async function deductInventoryFifo(opts: {
   inventoryItemId: string;
   quantity: number;
-  session: ClientSession;
+  session: ClientSession | null;
   /** When consuming a kitchen reservation, pass the same value as quantity so reservedStock is released. */
   releaseReserved: number;
+  preferredPurchaseIds?: string[];
 }): Promise<{ allocations: FifoAllocation[] }> {
-  const { inventoryItemId, quantity, session, releaseReserved } = opts;
+  const { inventoryItemId, quantity, session, releaseReserved, preferredPurchaseIds } = opts;
   if (!(quantity > 0)) {
     return { allocations: [] };
   }
@@ -42,15 +43,23 @@ export async function deductInventoryFifo(opts: {
 
   let need = quantity;
   const allocations: FifoAllocation[] = [];
+  let searchPreferred = Array.isArray(preferredPurchaseIds) && preferredPurchaseIds.length > 0;
+  const preferredOids = searchPreferred
+    ? preferredPurchaseIds!.map((id) => new mongoose.Types.ObjectId(id))
+    : [];
 
   while (need > 0) {
-    const layerRaw = await StockLayer.findOne({
+    const layerQuery: any = {
       inventoryItem: invId,
       quantityRemaining: { $gt: 0 },
-    })
-      .sort({ receivedAt: 1, _id: 1 })
-      .session(session)
-      .lean();
+    };
+    if (searchPreferred) {
+      layerQuery.purchase = { $in: preferredOids };
+    }
+
+    let layerQueryExec = StockLayer.findOne(layerQuery).sort({ receivedAt: 1, _id: 1 });
+    if (session) layerQueryExec = layerQueryExec.session(session);
+    const layerRaw = await layerQueryExec.lean();
     const layer = layerRaw as unknown as {
       _id: mongoose.Types.ObjectId;
       quantityRemaining: number;
@@ -58,11 +67,16 @@ export async function deductInventoryFifo(opts: {
     } | null;
 
     if (!layer) {
-      const inv = await Inventory.findById(invId).session(session).select("name currentStock reservedStock").lean();
-      const openLayers = await StockLayer.find({ inventoryItem: invId, quantityRemaining: { $gt: 0 } })
-        .session(session)
-        .select("quantityRemaining")
-        .lean();
+      if (searchPreferred) {
+        searchPreferred = false;
+        continue;
+      }
+      let invQuery = Inventory.findById(invId).select("name currentStock reservedStock");
+      if (session) invQuery = invQuery.session(session);
+      const inv = await invQuery.lean();
+      let layerQueryExec = StockLayer.find({ inventoryItem: invId, quantityRemaining: { $gt: 0 } }).select("quantityRemaining");
+      if (session) layerQueryExec = layerQueryExec.session(session);
+      const openLayers = await layerQueryExec.lean();
       const layerSum = openLayers.reduce((s, d) => s + (Number((d as { quantityRemaining?: number }).quantityRemaining) || 0), 0);
       const cur = (inv as { currentStock?: number } | null)?.currentStock ?? 0;
       const res = (inv as { reservedStock?: number } | null)?.reservedStock ?? 0;
@@ -80,10 +94,12 @@ export async function deductInventoryFifo(opts: {
     const remainingOnLayer = Number(layer.quantityRemaining);
     const take = Math.min(need, remainingOnLayer);
 
+    const updateLayerOptions: any = { new: true };
+    if (session) updateLayerOptions.session = session;
     const updated = await StockLayer.findOneAndUpdate(
       { _id: layer._id, quantityRemaining: { $gte: take } },
       { $inc: { quantityRemaining: -take } },
-      { session, new: true }
+      updateLayerOptions
     ).lean();
 
     if (!updated) {
@@ -98,14 +114,18 @@ export async function deductInventoryFifo(opts: {
     need -= take;
   }
 
+  const updateOptions: any = { new: true };
+  if (session) updateOptions.session = session;
   const invUpdated = await Inventory.findOneAndUpdate(
     inventoryGuard,
     { $inc: { currentStock: -quantity, reservedStock: -releaseReserved } },
-    { session, new: true }
+    updateOptions
   ).lean();
 
   if (!invUpdated) {
-    const inv = await Inventory.findById(invId).session(session).select("name currentStock reservedStock").lean();
+    let invQuery = Inventory.findById(invId).select("name currentStock reservedStock");
+    if (session) invQuery = invQuery.session(session);
+    const inv = await invQuery.lean();
     const cur = (inv as { currentStock?: number } | null)?.currentStock ?? 0;
     const res = (inv as { reservedStock?: number } | null)?.reservedStock ?? 0;
     throw new InsufficientStockError([

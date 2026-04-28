@@ -7,6 +7,7 @@ import InventoryConsumption from "../models/InventoryConsumption";
 import InventoryReservation from "../models/InventoryReservation";
 import { InsufficientStockError } from "./inventoryErrors";
 import { deductInventoryFifo, type FifoAllocation } from "./inventoryFifo";
+import { createJournalEntryRecord, findLedgerAccount } from "./journalPosting";
 
 const UNIT_GROUP: Record<string, string> = {
   ml: "volume",
@@ -122,6 +123,184 @@ function normalizeProductRef(product: unknown): mongoose.Types.ObjectId {
     return new mongoose.Types.ObjectId(String((product as { _id: unknown })._id));
   }
   return new mongoose.Types.ObjectId(String(product));
+}
+
+async function findLedgerAccountByFallback(primary: Record<string, unknown>, fallback?: Record<string, unknown>): Promise<any | null> {
+  const account = await findLedgerAccount(primary);
+  if (account) return account;
+  if (fallback) return findLedgerAccount(fallback);
+  return null;
+}
+
+async function postPOSOrderJournalEntry(
+  order: any,
+  invoice: any,
+  allocations: Array<{ inventoryItem: mongoose.Types.ObjectId; quantityConsumed: number; fifoAllocations: FifoAllocation[] }>,
+  session: ClientSession | null
+) {
+  if (!order || !invoice || !order._id) return;
+
+  const total = Number(invoice.total || 0);
+  const subtotal = Number(order.subtotal || 0);
+  const taxAmount = Number(invoice.taxAmount || 0);
+  const serviceChargeAmount = Number(invoice.serviceChargeAmount || 0);
+  const discountAmount = Number(order.discountAmount || 0);
+  const paymentAccountDiscountAmount = Number(invoice.paymentAccountDiscountAmount || 0);
+  if (!total || total <= 0) return;
+
+  const paymentAccount = await findLedgerAccountByFallback(
+    { type: { $in: ["asset", "bank"] }, title: /cash|bank/i },
+    { type: { $in: ["asset", "bank"] } }
+  );
+  const revenueAccount = await findLedgerAccountByFallback(
+    { type: "revenue", title: /sales|revenue/i },
+    { type: "revenue" }
+  );
+  const taxAccount = await findLedgerAccountByFallback(
+    { type: "liability", title: /tax/i },
+    { type: "liability" }
+  );
+  const serviceAccount = serviceChargeAmount > 0
+    ? await findLedgerAccountByFallback(
+        { type: "revenue", title: /service/i },
+        { type: "revenue" }
+      )
+    : null;
+
+  const costAmount = allocations.reduce((sum, line) => {
+    return (
+      sum +
+      (line.fifoAllocations || []).reduce(
+        (inner, allocation) => inner + Number(allocation.unitCost || 0) * Number(allocation.quantity || 0),
+        0
+      )
+    );
+  }, 0);
+
+  let cogsAccount: any = null;
+  let inventoryAccount: any = null;
+  if (costAmount > 0) {
+    cogsAccount = await findLedgerAccountByFallback(
+      { type: "expense", title: /cost of goods sold|cogs|cost/i },
+      { type: "expense" }
+    );
+    inventoryAccount = await findLedgerAccountByFallback(
+      { title: /inventory/i },
+      { type: "asset" }
+    );
+  }
+
+  let discountAccount = null as any;
+  if (discountAmount > 0 || paymentAccountDiscountAmount > 0) {
+    discountAccount = await findLedgerAccountByFallback(
+      { title: /discount|allowance|rebate/i },
+      { type: "expense" }
+    );
+    if (!discountAccount) {
+      discountAccount = revenueAccount;
+    }
+  }
+
+  if (!paymentAccount || !revenueAccount || !taxAccount) {
+    console.warn("Skipped POS journal entry: missing payment, revenue, or tax account mapping");
+    return;
+  }
+
+  const lines: any[] = [
+    {
+      account: paymentAccount._id,
+      accountName: paymentAccount.title,
+      debit: total,
+      credit: 0,
+      note: `POS order ${order.orderNumber}`,
+    },
+  ];
+
+  if (discountAmount > 0) {
+    lines.push({
+      account: discountAccount?._id || revenueAccount._id,
+      accountName: discountAccount?.title || revenueAccount.title,
+      debit: discountAmount,
+      credit: 0,
+      note: `Order discount for ${order.orderNumber}`,
+    });
+  }
+
+  if (paymentAccountDiscountAmount > 0) {
+    lines.push({
+      account: discountAccount?._id || revenueAccount._id,
+      accountName: discountAccount?.title || revenueAccount.title,
+      debit: paymentAccountDiscountAmount,
+      credit: 0,
+      note: `Payment account discount for ${order.orderNumber}`,
+    });
+  }
+
+  lines.push(
+    {
+      account: revenueAccount._id,
+      accountName: revenueAccount.title,
+      debit: 0,
+      credit: subtotal,
+      note: `POS sales revenue for ${order.orderNumber}`,
+    },
+    {
+      account: taxAccount._id,
+      accountName: taxAccount.title,
+      debit: 0,
+      credit: taxAmount,
+      note: `GST for ${order.orderNumber}`,
+    }
+  );
+
+  if (serviceChargeAmount > 0) {
+    lines.push({
+      account: serviceAccount?._id || revenueAccount._id,
+      accountName: serviceAccount?.title || revenueAccount.title,
+      debit: 0,
+      credit: serviceChargeAmount,
+      note: `Service charge for ${order.orderNumber}`,
+    });
+  }
+
+  if (costAmount > 0) {
+    if (!cogsAccount || !inventoryAccount) {
+      console.warn("Skipped COGS journal lines: missing COGS or inventory account mapping");
+    } else {
+      lines.push(
+        {
+          account: cogsAccount._id,
+          accountName: cogsAccount.title,
+          debit: costAmount,
+          credit: 0,
+          note: `COGS for ${order.orderNumber}`,
+        },
+        {
+          account: inventoryAccount._id,
+          accountName: inventoryAccount.title,
+          debit: 0,
+          credit: costAmount,
+          note: `Inventory reduction for ${order.orderNumber}`,
+        }
+      );
+    }
+  }
+
+  try {
+    await createJournalEntryRecord({
+      date: new Date(),
+      reference: invoice.invoiceNumber,
+      description: `POS sale invoice ${invoice.invoiceNumber}`,
+      lines,
+      source: "POS",
+      sourceId: order._id,
+      postedBy: invoice.issuedBy || order.servedBy || null,
+      session,
+    });
+  } catch (err: any) {
+    if (err?.message === "Journal entry already exists for this source") return;
+    console.error("Failed to create POS order journal entry:", err);
+  }
 }
 
 /**
@@ -325,6 +504,8 @@ async function runBillingInSession(s: ClientSession | null, input: BillingRecipe
   );
 
   await Order.findByIdAndUpdate(orderId, { status: "completed", taxAmount, total }, { session: s ?? undefined });
+
+  await postPOSOrderJournalEntry(order, invoice, linesForLedger, s);
 
   if (linesForLedger.length > 0) {
     await InventoryConsumption.create(

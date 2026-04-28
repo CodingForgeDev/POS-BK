@@ -5,8 +5,58 @@ import { connectDB } from "../lib/mongodb";
 import { sendSuccess, sendError } from "../lib/utils";
 import Purchase from "../models/Purchase";
 import { postPurchaseInSession, type PostPurchaseLineInput } from "../lib/purchasePosting";
+import { createJournalEntryRecord, findLedgerAccount } from "../lib/journalPosting";
 
 const router: Router = Router();
+
+async function postPurchaseJournalEntry(purchase: any) {
+  const amount = Number(purchase.totalAmount || 0);
+  if (!amount || !purchase._id) return;
+
+  const inventoryAccount =
+    (await findLedgerAccount({ title: /inventory/i })) ||
+    (await findLedgerAccount({ type: "asset" }));
+  const payableAccount =
+    (await findLedgerAccount({ type: "liability" })) ||
+    (await findLedgerAccount({ type: { $in: ["bank", "asset"] } }));
+
+  if (!inventoryAccount || !payableAccount) {
+    console.warn("Skipped purchase journal entry: missing inventory or payable account mapping");
+    return;
+  }
+
+  const lines = [
+    {
+      account: inventoryAccount._id,
+      accountName: inventoryAccount.title,
+      debit: amount,
+      credit: 0,
+      note: `Purchase ${purchase.referenceNumber || purchase._id}`,
+    },
+    {
+      account: payableAccount._id,
+      accountName: payableAccount.title,
+      debit: 0,
+      credit: amount,
+      note: `Purchase ${purchase.referenceNumber || purchase._id}`,
+    },
+  ];
+
+  try {
+    await createJournalEntryRecord({
+      date: purchase.receivedAt || new Date(),
+      reference: purchase.referenceNumber || purchase._id?.toString() || "",
+      description: `Purchase ${purchase.referenceNumber || purchase._id}`,
+      lines,
+      source: "PURCHASE",
+      sourceId: purchase._id,
+      postedBy: purchase.createdBy,
+    });
+  } catch (err: any) {
+    if (err?.message === "Journal entry already exists for this source") return;
+    console.error("Failed to create purchase journal entry:", err);
+  }
+}
 
 router.get("/", authenticate, async (req: AuthenticatedRequest, res: Response) => {
   try {
@@ -146,6 +196,10 @@ router.post("/", authenticate, async (req: AuthenticatedRequest, res: Response) 
       .populate("createdBy", "name")
       .populate("lines.inventoryItem", "name unit sku")
       .lean();
+
+    if (populated) {
+      await postPurchaseJournalEntry(populated);
+    }
 
     return sendSuccess(res, populated, "Purchase recorded", 201);
   } catch (error) {

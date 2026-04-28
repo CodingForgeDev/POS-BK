@@ -3,8 +3,53 @@ import { authenticate, AuthenticatedRequest } from "../middleware/auth";
 import { connectDB } from "../lib/mongodb";
 import { sendSuccess, sendError } from "../lib/utils";
 import Expense from "../models/Expense";
+import { createJournalEntryRecord, findLedgerAccount } from "../lib/journalPosting";
 
 const router: Router = Router();
+
+async function postExpenseJournalEntry(expense: any) {
+  const amount = Number(expense.amount || 0);
+  if (!amount || !expense._id) return;
+
+  const expenseAccount = await findLedgerAccount({ type: "expense" });
+  const paymentAccount = await findLedgerAccount({ type: { $in: ["asset", "bank"] } });
+  if (!expenseAccount || !paymentAccount) {
+    console.warn("Skipped expense journal entry: missing expense or payment account mapping");
+    return;
+  }
+
+  const lines = [
+    {
+      account: expenseAccount._id,
+      accountName: expenseAccount.title,
+      debit: amount,
+      credit: 0,
+      note: `Expense ${expense.title || expense._id}`,
+    },
+    {
+      account: paymentAccount._id,
+      accountName: paymentAccount.title,
+      debit: 0,
+      credit: amount,
+      note: `Expense ${expense.title || expense._id}`,
+    },
+  ];
+
+  try {
+    await createJournalEntryRecord({
+      date: expense.date || new Date(),
+      reference: expense._id?.toString() || "",
+      description: `Expense ${expense.title || "entry"}`,
+      lines,
+      source: "EXPENSE",
+      sourceId: expense._id,
+      postedBy: expense.addedBy,
+    });
+  } catch (err: any) {
+    if (err?.message === "Journal entry already exists for this source") return;
+    console.error("Failed to create expense journal entry:", err);
+  }
+}
 
 router.get("/", authenticate, async (req: AuthenticatedRequest, res: Response) => {
   try {
@@ -48,8 +93,10 @@ router.post("/", authenticate, async (req: AuthenticatedRequest, res: Response) 
   try {
     await connectDB();
     const expense = await Expense.create({ ...req.body, addedBy: req.user.id });
+    await postExpenseJournalEntry(expense);
     return sendSuccess(res, expense, "Expense added successfully", 201);
   } catch (error) {
+    console.error("Add expense error:", error);
     return sendError(res, "Failed to add expense", 500);
   }
 });

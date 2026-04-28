@@ -5,9 +5,11 @@ import { connectDB } from "../lib/mongodb";
 import { sendSuccess, sendError, generateInvoiceNumber } from "../lib/utils";
 import Invoice from "../models/Invoice";
 import Order from "../models/Order";
+import JournalEntry from "../models/JournalEntry";
 import { isAdminOrManagerRoleName } from "../lib/role-utils";
 import Customer from "../models/Customer";
 import { getGstRateForMethod } from "../lib/gst";
+import { reverseJournalEntryRecord } from "../lib/journalPosting";
 import {
   executeBillingWithRecipeConsumption,
   InsufficientStockError,
@@ -94,6 +96,30 @@ const FULL_POPULATE = [
 async function fetchPopulatedInvoice(id: any) {
   const doc = await Invoice.findById(id).populate(FULL_POPULATE as any).lean();
   return sanitizeInvoice(doc);
+}
+
+async function reverseSaleJournalForInvoice(invoice: any, postedBy: any) {
+  if (!invoice || !invoice.order) {
+    return null;
+  }
+
+  const originalSale = (await JournalEntry.findOne({ source: "POS", sourceId: invoice.order }).lean()) as any;
+  if (!originalSale) {
+    console.warn("No original POS journal entry found for refund reversal", { order: invoice.order });
+    return null;
+  }
+
+  const reversalReference = `REV-${String(originalSale.reference || originalSale._id)}`;
+  const existingReversal = await JournalEntry.findOne({ reference: reversalReference, source: "MANUAL" }).lean();
+  if (existingReversal) {
+    return existingReversal;
+  }
+
+  return reverseJournalEntryRecord(originalSale, {
+    reference: reversalReference,
+    postedBy,
+    status: "posted",
+  });
 }
 
 // ─── Router ──────────────────────────────────────────────────────────────────
@@ -438,6 +464,13 @@ router.post(
         { runValidators: false }
       );
 
+      if (newStatus === "refunded") {
+        const updatedInvoice = await Invoice.findById(id).lean();
+        if (updatedInvoice) {
+          await reverseSaleJournalForInvoice(updatedInvoice, req.user.id);
+        }
+      }
+
       return sendSuccess(
         res,
         await fetchPopulatedInvoice(id),
@@ -534,6 +567,8 @@ router.post(
       invoice.refundedAt = new Date();
       invoice.refundedBy = req.user.id;
       await invoice.save();
+
+      await reverseSaleJournalForInvoice(invoice, req.user.id);
 
       return sendSuccess(
         res,

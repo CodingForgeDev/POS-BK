@@ -37,7 +37,7 @@ const OrderSchema = new mongoose.Schema(
     orderNumber: { type: String, required: true, unique: true },
     type: {
       type: String,
-      enum: ["dine-in", "takeaway", "delivery"],
+      enum: ["dine-in", "takeaway", "takeaway-service", "delivery"],
       required: true,
     },
     status: {

@@ -8,7 +8,7 @@ import { isAdminRoleName } from "../lib/role-utils";
 import Customer from "../models/Customer";
 import { getGstRateForMethod } from "../lib/gst";
 import { computeOrderFinancials } from "../lib/orderAmounts";
-import { getDineInServiceChargePercent } from "../lib/serviceCharge";
+import { getOrderServiceChargeConfig } from "../lib/serviceCharge";
 import { reserveInventoryForOrder, releaseReservationForOrder } from "../lib/inventoryReservations";
 import { InsufficientStockError } from "../lib/recipeInventory";
 
@@ -221,15 +221,15 @@ router.post("/", authenticate, async (req: AuthenticatedRequest, res: Response) 
     }
 
     const subtotal = normalizedItems.reduce((sum, item) => sum + item.subtotal, 0);
-    const [gstRatePct, servicePct] = await Promise.all([
+    const [gstRatePct, serviceChargeConfig] = await Promise.all([
       getGstRateForMethod(paymentMethod || "default"),
-      getDineInServiceChargePercent(),
+      getOrderServiceChargeConfig(type),
     ]);
     const { discountAmount, serviceChargeAmount, taxAmount, total } = computeOrderFinancials({
       subtotal,
       discount,
       orderType: type,
-      serviceChargePercent: servicePct,
+      serviceChargeConfig,
       gstRatePct,
     });
 
@@ -395,15 +395,15 @@ router.patch("/:id", authenticate, async (req: AuthenticatedRequest, res: Respon
         return sendError(res, 'At least one valid item is required', 400);
       }
       const subtotal = normalizedItems.reduce((sum, item) => sum + item.subtotal, 0);
-      const [gstRatePct, servicePct] = await Promise.all([
+      const [gstRatePct, serviceChargeConfig] = await Promise.all([
         getGstRateForMethod('default'),
-        getDineInServiceChargePercent(),
+        getOrderServiceChargeConfig(order.type),
       ]);
       const { serviceChargeAmount, taxAmount, total } = computeOrderFinancials({
         subtotal,
         discountAmountFixed: order.discountAmount || 0,
         orderType: order.type,
-        serviceChargePercent: servicePct,
+        serviceChargeConfig,
         gstRatePct,
       });
 
@@ -538,15 +538,15 @@ router.patch("/:id/items", authenticate, async (req: AuthenticatedRequest, res: 
       return sendError(res, "At least one valid item is required", 400);
     }
     const subtotal = normalizedItems.reduce((sum, item) => sum + item.subtotal, 0);
-    const [gstRatePct, servicePct] = await Promise.all([
+    const [gstRatePct, serviceChargeConfig] = await Promise.all([
       getGstRateForMethod("default"),
-      getDineInServiceChargePercent(),
+      getOrderServiceChargeConfig(order.type),
     ]);
     const { serviceChargeAmount, taxAmount, total } = computeOrderFinancials({
       subtotal,
       discountAmountFixed: order.discountAmount || 0,
       orderType: order.type,
-      serviceChargePercent: servicePct,
+      serviceChargeConfig,
       gstRatePct,
     });
 

@@ -13,6 +13,11 @@ export function computeDiscountAmount(subtotal: number, discount: DiscountInput)
   return Math.min(subtotal, discount.value);
 }
 
+export type ServiceChargeConfig = {
+  type: "percentage" | "fixed";
+  value: number;
+};
+
 export interface OrderFinancialsInput {
   subtotal: number;
   /** Use when updating items on an existing order (discount already stored). */
@@ -20,7 +25,8 @@ export interface OrderFinancialsInput {
   discount?: DiscountInput;
   orderType: string;
   /** Percent of (subtotal − discount), e.g. 5 for 5%. Only applied when orderType is dine-in. */
-  serviceChargePercent: number;
+  serviceChargePercent?: number;
+  serviceChargeConfig?: ServiceChargeConfig;
   gstRatePct: number;
 }
 
@@ -31,9 +37,20 @@ export function computeOrderFinancials(input: OrderFinancialsInput) {
       : computeDiscountAmount(input.subtotal, input.discount);
 
   const afterDiscount = Math.max(0, input.subtotal - discountAmount);
-  const pct = Math.max(0, Math.min(100, input.serviceChargePercent || 0));
+  const config: ServiceChargeConfig =
+    input.serviceChargeConfig ?? {
+      type: "percentage",
+      value: Number.isFinite(input.serviceChargePercent || 0)
+        ? Math.max(0, Math.min(100, input.serviceChargePercent || 0))
+        : 0,
+    };
+
   const serviceChargeAmount =
-    input.orderType === "dine-in" && pct > 0 ? (afterDiscount * pct) / 100 : 0;
+    (input.orderType === "dine-in" || input.orderType === "takeaway-service") && config.value > 0
+      ? config.type === "percentage"
+        ? (afterDiscount * config.value) / 100
+        : Math.max(0, config.value)
+      : 0;
 
   const taxableBase = afterDiscount + serviceChargeAmount;
   const rate = Math.max(0, Math.min(100, input.gstRatePct || 0));

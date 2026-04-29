@@ -13,12 +13,17 @@ const router: Router = Router();
 const SALARY_TYPES = ["hourly", "weekly", "monthly"] as const;
 const USER_ROLES = ["admin", "cashier", "kitchen", "manager"] as const;
 
+function escapeRegExp(value: string) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
 async function isAllowedRole(role: unknown): Promise<boolean> {
   if (typeof role !== "string") return false;
   const normalized = role.trim();
   if (!normalized) return false;
-  if (USER_ROLES.includes(normalized as (typeof USER_ROLES)[number])) return true;
-  const existing = await Role.findOne({ name: normalized });
+  const lowerRole = normalized.toLowerCase();
+  if (USER_ROLES.includes(lowerRole as (typeof USER_ROLES)[number])) return true;
+  const existing = await Role.findOne({ name: new RegExp(`^${escapeRegExp(normalized)}$`, "i") });
   return Boolean(existing);
 }
 

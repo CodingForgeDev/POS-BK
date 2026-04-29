@@ -123,6 +123,20 @@ function deriveGlobalOrderStatus(kitchenStatus: StationState | null, barStatus: 
   return "accepted";
 }
 
+function resolveStationStatus(
+  existingStatus: StationState | null,
+  newStatus: StationState | null
+): StationState | null {
+  if (!newStatus) return existingStatus;
+  if (existingStatus === "preparing") {
+    return newStatus === "ready" ? "ready" : "preparing";
+  }
+  if (existingStatus === "ready") {
+    return newStatus;
+  }
+  return newStatus;
+}
+
 function sanitizeOrderItems(rawItems: unknown): NormalizedOrderItem[] {
   if (!Array.isArray(rawItems)) return [];
   return rawItems
@@ -577,10 +591,27 @@ router.patch("/:id/items", authenticate, async (req: AuthenticatedRequest, res: 
             ? "ready"
             : newBarStatus;
       }
+      if (status === "preparing") {
+        const now = new Date();
+        updatePayload.preparingStartedAt = now;
+        if (newKitchenStatus) {
+          updatePayload.kitchenPreparingStartedAt = now;
+        }
+        if (newBarStatus) {
+          updatePayload.barPreparingStartedAt = now;
+        }
+      }
     } else {
-      if (newKitchenStatus) updatePayload.kitchenStatus = newKitchenStatus;
-      if (newBarStatus) updatePayload.barStatus = newBarStatus;
-      updatePayload.status = deriveGlobalOrderStatus(newKitchenStatus, newBarStatus);
+      updatePayload.kitchenStatus = resolveStationStatus(order.kitchenStatus ?? null, newKitchenStatus);
+      updatePayload.barStatus = resolveStationStatus(order.barStatus ?? null, newBarStatus);
+      if (order.status === "preparing") {
+        updatePayload.status = "preparing";
+      } else {
+        updatePayload.status = deriveGlobalOrderStatus(
+          updatePayload.kitchenStatus as StationState | null,
+          updatePayload.barStatus as StationState | null
+        );
+      }
     }
 
     const updated = await Order.findByIdAndUpdate(req.params.id, updatePayload, { new: true })

@@ -126,6 +126,15 @@ async function reverseSaleJournalForInvoice(invoice: any, postedBy: any) {
 
 const router: Router = Router();
 
+function normalizeRoleName(value: unknown): string {
+  return typeof value === "string" ? value.trim().toLowerCase() : "";
+}
+
+function isCashierRoleName(roleName: string): boolean {
+  const normalized = normalizeRoleName(roleName);
+  return normalized === "cashier" || normalized.includes("cashier");
+}
+
 // GET /billing
 router.get("/", authenticate, async (req: AuthenticatedRequest, res: Response) => {
   try {
@@ -586,6 +595,11 @@ router.post(
 router.post("/", authenticate, async (req: AuthenticatedRequest, res: Response) => {
   try {
     await connectDB();
+    const isAdminOrManager = await isAdminOrManagerRoleName(req.user.role);
+    const isCashier = isCashierRoleName(req.user.role);
+    if (!isAdminOrManager && !isCashier) {
+      return sendError(res, "Unauthorized", 403);
+    }
     const {
       orderId,
       paymentMethod,
@@ -624,7 +638,12 @@ router.post("/", authenticate, async (req: AuthenticatedRequest, res: Response) 
 
     const order = await Order.findById(normalizedOrderId);
     if (!order) return sendError(res, "Order not found", 404);
-    if (order.status === "completed") return sendError(res, "Order already billed", 400);
+    const normalizedOrderStatus = String(order.status || "").toLowerCase() === "completed" ? "closed" : String(order.status || "").toLowerCase();
+    if (normalizedOrderStatus === "closed") return sendError(res, "Order already billed", 400);
+    if (["cancelled", "rejected"].includes(normalizedOrderStatus)) return sendError(res, "Cancelled or rejected orders cannot be billed", 400);
+    if (!["served", "ready"].includes(normalizedOrderStatus) && !isAdminOrManager) {
+      return sendError(res, "Only served orders can be closed by cashier", 400);
+    }
 
     const gstRatePct = await getGstRateForMethod(paymentMethodValue);
     const { discountAmount, serviceChargeAmount, taxAmount, total } = invoiceTotalsFromOrder(
@@ -688,6 +707,23 @@ router.post("/", authenticate, async (req: AuthenticatedRequest, res: Response) 
     if (!invoice) {
       throw lastError ?? new Error("Failed to create invoice");
     }
+
+    await Order.findByIdAndUpdate(normalizedOrderId, {
+      status: "completed",
+      closedBy: req.user.id,
+      closedAt: new Date(),
+      updatedBy: req.user.id,
+      $push: {
+        statusHistory: {
+          from: normalizedOrderStatus,
+          to: "closed",
+          changedBy: req.user.id,
+          changedRole: req.user.role,
+          changedAt: new Date(),
+          source: "billing-api",
+        },
+      },
+    });
 
     if (order.customer) {
       await Customer.findByIdAndUpdate(order.customer, {

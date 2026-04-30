@@ -16,6 +16,7 @@
     "seed:expenses": "tsx scripts/seed-expenses.js",
     "seed:orders": "tsx scripts/seed-orders.js",
     "seed:invoices": "tsx scripts/seed-invoices.js",
+    "test:lifecycle": "tsx --test src/tests/orderLifecycle.test.ts",
     "backfill:stock-layers": "tsx scripts/backfill-stock-layers-from-inventory.ts",
     "seed:suppliers-purchases": "tsx scripts/seed-suppliers-and-purchases.ts"
   },

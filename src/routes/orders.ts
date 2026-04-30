@@ -11,6 +11,7 @@ import { computeOrderFinancials } from "../lib/orderAmounts";
 import { getOrderServiceChargeConfig } from "../lib/serviceCharge";
 import { reserveInventoryForOrder, releaseReservationForOrder } from "../lib/inventoryReservations";
 import { InsufficientStockError } from "../lib/recipeInventory";
+import { canTransitionOrderStatus, normalizeOrderStatus, toLegacyStatus } from "../lib/orderLifecycle";
 
 const router: Router = Router();
 
@@ -39,12 +40,28 @@ type StationState = "accepted" | "preparing" | "ready";
 type NormalizedModifierAction = NormalizedModifier["action"];
 
 const ALLOWED_MODIFIER_ACTIONS = new Set(["add", "no", "extra", "side", "substitute"]);
-const ACTIVE_ORDER_STATUSES = ["open", "accepted", "preparing", "ready"] as const;
+const ACTIVE_ORDER_STATUSES = ["open", "created", "sent", "accepted", "preparing", "ready", "served"] as const;
 
 function normalizeModifierAction(raw: unknown): NormalizedModifierAction {
   const action = String(raw ?? "add").trim().toLowerCase();
   if (ALLOWED_MODIFIER_ACTIONS.has(action)) return action as NormalizedModifier["action"];
   return "add";
+}
+
+function appendStatusHistory(order: any, toStatusRaw: string, actorId: string, actorRole: string, source = "orders-api") {
+  const toStatus = normalizeOrderStatus(toStatusRaw);
+  const fromStatus = normalizeOrderStatus(order.status);
+  if (fromStatus === toStatus) return;
+  const history = Array.isArray(order.statusHistory) ? [...order.statusHistory] : [];
+  history.push({
+    from: fromStatus,
+    to: toStatus,
+    changedBy: actorId,
+    changedRole: actorRole,
+    changedAt: new Date(),
+    source,
+  });
+  order.statusHistory = history;
 }
 
 function cleanText(raw: unknown, max = 160): string {
@@ -175,7 +192,8 @@ router.get("/", authenticate, async (req: AuthenticatedRequest, res: Response) =
       if (status === "active") {
         query.status = { $in: ACTIVE_ORDER_STATUSES };
       } else {
-        query.status = status;
+        const normalizedStatus = normalizeOrderStatus(status);
+        query.status = { $in: [normalizedStatus, toLegacyStatus(normalizedStatus)] };
       }
     }
     if (type && type !== "all") query.type = type;
@@ -186,9 +204,6 @@ router.get("/", authenticate, async (req: AuthenticatedRequest, res: Response) =
       end.setHours(23, 59, 59, 999);
       query.createdAt = { $gte: start, $lte: end };
     }
-    if (!(await isAdminRoleName(req.user.role))) {
-      query.servedBy = req.user.id;
-    }
 
     const pageNum = parseInt(page);
     const limitNum = parseInt(limit);
@@ -196,13 +211,18 @@ router.get("/", authenticate, async (req: AuthenticatedRequest, res: Response) =
     const total = await Order.countDocuments(query);
     const orders = await Order.find(query)
       .populate("customer", "name phone")
+      .populate("createdBy", "name")
       .populate("servedBy", "name")
       .sort({ createdAt: -1 })
       .skip((pageNum - 1) * limitNum)
       .limit(limitNum)
       .lean();
 
-    return sendSuccess(res, { orders, total, page: pageNum, limit: limitNum });
+    const normalizedOrders = orders.map((order: any) => ({
+      ...order,
+      status: normalizeOrderStatus(order.status),
+    }));
+    return sendSuccess(res, { orders: normalizedOrders, total, page: pageNum, limit: limitNum });
   } catch (error) {
     console.error("Get orders error:", error);
     return sendError(res, "Failed to fetch orders", 500);
@@ -258,12 +278,13 @@ router.post("/", authenticate, async (req: AuthenticatedRequest, res: Response) 
         ? "ready"
         : "accepted"
       : null;
+    const requestedStatus = normalizeOrderStatus(status);
     const orderStatus =
-      status && ["open", "accepted", "rejected", "preparing", "ready"].includes(status)
-        ? status
+      requestedStatus && ["created", "sent", "accepted", "rejected", "preparing", "ready", "served"].includes(requestedStatus)
+        ? requestedStatus
         : allReady
           ? "ready"
-          : "accepted";
+          : "created";
 
     const validCustomerId = typeof customerId === "string" && mongoose.isValidObjectId(customerId) ? customerId : null;
     const phoneValue = typeof customerPhone === "string" ? customerPhone.trim() : "";
@@ -303,7 +324,7 @@ router.post("/", authenticate, async (req: AuthenticatedRequest, res: Response) 
         order = await Order.create({
           orderNumber,
           type,
-          status: orderStatus,
+          status: toLegacyStatus(orderStatus),
           items: normalizedItems,
           customerName: linkedCustomerName || "Walk-in",
           customer: linkedCustomerId,
@@ -316,7 +337,18 @@ router.post("/", authenticate, async (req: AuthenticatedRequest, res: Response) 
           total,
           kitchenStatus,
           barStatus,
-          servedBy: req.user.id,
+          createdBy: req.user.id,
+          updatedBy: req.user.id,
+          statusHistory: [
+            {
+              from: null,
+              to: orderStatus,
+              changedBy: req.user.id,
+              changedRole: req.user.role,
+              changedAt: new Date(),
+              source: "orders-api",
+            },
+          ],
         });
         break;
       } catch (error) {
@@ -340,10 +372,11 @@ router.get("/:id", authenticate, async (req: AuthenticatedRequest, res: Response
     await connectDB();
     const order = await Order.findById(req.params.id)
       .populate("customer", "name phone email")
+      .populate("createdBy", "name")
       .populate("servedBy", "name");
 
     if (!order) return sendError(res, "Order not found", 404);
-    return sendSuccess(res, order);
+    return sendSuccess(res, { ...order.toObject(), status: normalizeOrderStatus(order.status) });
   } catch (error) {
     return sendError(res, "Failed to fetch order", 500);
   }
@@ -383,7 +416,8 @@ router.patch("/:id", authenticate, async (req: AuthenticatedRequest, res: Respon
     const orderId = req.params.id;
     const order = await Order.findById(orderId);
     if (!order) return sendError(res, 'Order not found', 404);
-    if (['completed', 'cancelled'].includes(order.status)) {
+    const currentStatus = normalizeOrderStatus(order.status);
+    if (['closed', 'cancelled', 'rejected'].includes(currentStatus)) {
       return sendError(res, 'Cannot modify a completed or cancelled order', 400);
     }
 
@@ -428,7 +462,10 @@ router.patch("/:id", authenticate, async (req: AuthenticatedRequest, res: Respon
       updates.total = total;
     }
 
-    const nextStatus = typeof updates.status === 'string' ? updates.status : undefined;
+    const nextStatus = typeof updates.status === 'string' ? normalizeOrderStatus(updates.status) : undefined;
+    if (nextStatus && !canTransitionOrderStatus(req.user.role, currentStatus, nextStatus)) {
+      return sendError(res, "Unauthorized status transition", 403);
+    }
     if (nextStatus === 'preparing' && !station) {
       const stationKey = order.items.some((item: any) => item.station === 'kitchen') && !order.items.some((item: any) => item.station === 'bar')
         ? 'kitchen'
@@ -460,8 +497,24 @@ router.patch("/:id", authenticate, async (req: AuthenticatedRequest, res: Respon
     const currentKitchenStatus = (updates.kitchenStatus as StationState) ?? order.kitchenStatus ?? deriveStationStatus(currentItems, 'kitchen');
     const currentBarStatus = (updates.barStatus as StationState) ?? order.barStatus ?? deriveStationStatus(currentItems, 'bar');
     const derivedStatus = deriveGlobalOrderStatus(currentKitchenStatus, currentBarStatus);
-    if (!updates.status && !['rejected', 'cancelled', 'completed'].includes(order.status)) {
+    if (!updates.status && !['rejected', 'cancelled', 'completed', 'closed'].includes(currentStatus)) {
       updates.status = derivedStatus;
+    }
+    if (typeof updates.status === "string") {
+      updates.status = toLegacyStatus(normalizeOrderStatus(updates.status));
+      updates.updatedBy = req.user.id;
+      const normalizedTo = normalizeOrderStatus(updates.status);
+      appendStatusHistory(order, normalizedTo, req.user.id, req.user.role);
+      updates.statusHistory = order.statusHistory;
+      if (normalizedTo === "accepted") updates.acceptedBy = req.user.id;
+      if (normalizedTo === "preparing") updates.preparingBy = req.user.id;
+      if (normalizedTo === "ready") updates.readyBy = req.user.id;
+      if (normalizedTo === "served") {
+        updates.servedBy = req.user.id;
+        updates.servedAt = updates.servedAt ?? new Date();
+      }
+    } else {
+      updates.updatedBy = req.user.id;
     }
 
     if (updates.status === 'preparing' || updates.status === 'cancelled' || updates.status === 'rejected') {
@@ -513,10 +566,15 @@ router.patch("/:id", authenticate, async (req: AuthenticatedRequest, res: Respon
 
     const updated = await Order.findById(orderId)
       .populate('customer', 'name phone')
+      .populate('createdBy', 'name')
       .populate('servedBy', 'name');
 
     if (!updated) return sendError(res, 'Order not found', 404);
-    return sendSuccess(res, updated, 'Order updated successfully');
+    return sendSuccess(
+      res,
+      updated ? { ...updated.toObject(), status: normalizeOrderStatus(updated.status) } : updated,
+      'Order updated successfully'
+    );
   } catch (error) {
     return sendError(res, 'Failed to update order', 500);
   }
@@ -544,7 +602,8 @@ router.patch("/:id/items", authenticate, async (req: AuthenticatedRequest, res: 
 
     const order = await Order.findById(req.params.id);
     if (!order) return sendError(res, "Order not found", 404);
-    if (["completed", "cancelled"].includes(order.status)) {
+    const currentStatus = normalizeOrderStatus(order.status);
+    if (["closed", "cancelled", "rejected"].includes(currentStatus)) {
       return sendError(res, "Cannot modify a completed or cancelled order", 400);
     }
 
@@ -575,23 +634,28 @@ router.patch("/:id/items", authenticate, async (req: AuthenticatedRequest, res: 
       total,
     };
 
-    if (status && ["accepted", "preparing", "ready"].includes(status)) {
-      updatePayload.status = status;
+    const nextStatus = normalizeOrderStatus(status);
+    if (nextStatus && !canTransitionOrderStatus(req.user.role, currentStatus, nextStatus)) {
+      return sendError(res, "Unauthorized status transition", 403);
+    }
+
+    if (nextStatus && ["accepted", "preparing", "ready", "served"].includes(nextStatus)) {
+      updatePayload.status = toLegacyStatus(nextStatus);
       if (newKitchenStatus) {
-        updatePayload.kitchenStatus = status === "preparing" && newKitchenStatus !== "ready"
+        updatePayload.kitchenStatus = nextStatus === "preparing" && newKitchenStatus !== "ready"
           ? "preparing"
-          : status === "ready"
+          : nextStatus === "ready"
             ? "ready"
             : newKitchenStatus;
       }
       if (newBarStatus) {
-        updatePayload.barStatus = status === "preparing" && newBarStatus !== "ready"
+        updatePayload.barStatus = nextStatus === "preparing" && newBarStatus !== "ready"
           ? "preparing"
-          : status === "ready"
+          : nextStatus === "ready"
             ? "ready"
             : newBarStatus;
       }
-      if (status === "preparing") {
+      if (nextStatus === "preparing") {
         const now = new Date();
         updatePayload.preparingStartedAt = now;
         if (newKitchenStatus) {
@@ -604,7 +668,7 @@ router.patch("/:id/items", authenticate, async (req: AuthenticatedRequest, res: 
     } else {
       updatePayload.kitchenStatus = resolveStationStatus(order.kitchenStatus ?? null, newKitchenStatus);
       updatePayload.barStatus = resolveStationStatus(order.barStatus ?? null, newBarStatus);
-      if (order.status === "preparing") {
+      if (normalizeOrderStatus(order.status) === "preparing") {
         updatePayload.status = "preparing";
       } else {
         updatePayload.status = deriveGlobalOrderStatus(
@@ -614,11 +678,18 @@ router.patch("/:id/items", authenticate, async (req: AuthenticatedRequest, res: 
       }
     }
 
+    updatePayload.updatedBy = req.user.id;
+    if (typeof updatePayload.status === "string") {
+      appendStatusHistory(order, normalizeOrderStatus(updatePayload.status), req.user.id, req.user.role, "orders-items");
+      updatePayload.statusHistory = order.statusHistory;
+    }
+
     const updated = await Order.findByIdAndUpdate(req.params.id, updatePayload, { new: true })
       .populate("customer", "name phone")
+      .populate("createdBy", "name")
       .populate("servedBy", "name");
 
-    return sendSuccess(res, updated, "Order items updated");
+    return sendSuccess(res, updated ? { ...updated.toObject(), status: normalizeOrderStatus(updated.status) } : updated, "Order items updated");
   } catch (error) {
     console.error("Update order items error:", error);
     return sendError(res, "Failed to update order items", 500);

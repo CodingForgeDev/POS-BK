@@ -71,11 +71,11 @@ function invoiceTotalsFromOrder(
   const afterDiscount = Math.max(0, order.subtotal - discountAmount);
   const taxableBase = Math.max(
     0,
-    afterDiscount + serviceChargeAmount - Math.max(0, paymentAccountDiscountAmount)
+    afterDiscount - Math.max(0, paymentAccountDiscountAmount)
   );
   const rate = Math.max(0, Math.min(100, gstRatePct));
   const taxAmount = (taxableBase * rate) / 100;
-  const total = taxableBase + taxAmount;
+  const total = taxableBase + serviceChargeAmount + taxAmount;
   return { discountAmount, serviceChargeAmount, taxAmount, total };
 }
 

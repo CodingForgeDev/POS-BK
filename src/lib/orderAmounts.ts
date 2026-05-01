@@ -1,6 +1,6 @@
 /**
  * Single place for order subtotal → discount → dine-in service charge → GST → total.
- * Matches POS cart: GST applies to (subtotal − discount + service charge).
+ * GST applies to subtotal after discount only; service charge is added separately.
  */
 
 export type DiscountInput = { type: string; value: number } | null | undefined;
@@ -52,10 +52,10 @@ export function computeOrderFinancials(input: OrderFinancialsInput) {
         : Math.max(0, config.value)
       : 0;
 
-  const taxableBase = afterDiscount + serviceChargeAmount;
+  const taxableBase = afterDiscount;
   const rate = Math.max(0, Math.min(100, input.gstRatePct || 0));
   const taxAmount = (taxableBase * rate) / 100;
-  const total = taxableBase + taxAmount;
+  const total = afterDiscount + serviceChargeAmount + taxAmount;
 
   return {
     subtotal: input.subtotal,

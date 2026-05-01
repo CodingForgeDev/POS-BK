@@ -33,10 +33,10 @@ function computeOrderFinancials({ subtotal, orderType, serviceChargePercent, gst
   const pct = Math.max(0, Math.min(100, serviceChargePercent || 0));
   const serviceChargeAmount =
     orderType === "dine-in" && pct > 0 ? (afterDiscount * pct) / 100 : 0;
-  const taxableBase = afterDiscount + serviceChargeAmount;
+  const taxableBase = afterDiscount;
   const rate = Math.max(0, Math.min(100, gstRatePct || 0));
   const taxAmount = (taxableBase * rate) / 100;
-  const total = taxableBase + taxAmount;
+  const total = afterDiscount + serviceChargeAmount + taxAmount;
   return { subtotal, discountAmount, serviceChargeAmount, taxAmount, total };
 }
 

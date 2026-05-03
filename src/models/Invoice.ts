@@ -31,6 +31,7 @@ const RefundRequestSchema = new mongoose.Schema(
     requestedBy: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
     requestedAt: { type: Date },
     notes: { type: String },
+    code: { type: String },
     items: { type: [RefundRequestItemSchema] },
     status: {
       type: String,

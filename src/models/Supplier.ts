@@ -14,6 +14,7 @@ const SupplierSchema = new mongoose.Schema(
     notes: { type: String, default: "" },
     isActive: { type: Boolean, default: true },
     rating: { type: Number, min: 1, max: 5, default: null },
+    ledgerAccountId: { type: mongoose.Schema.Types.ObjectId, ref: "LedgerAccount", default: null },
   },
   { timestamps: true }
 );

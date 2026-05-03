@@ -59,12 +59,42 @@ async function applyPurchaseReturnInventoryDeduction(returnRecord: any, session:
 
 const router: Router = Router();
 
+const INVENTORY_METADATA_BLACKLIST = ["location", "quantity", "unit", "minLevel", "costMethod", "inventoryItemId"];
+
+function sanitizeMetadata(value: unknown): Record<string, unknown> {
+  if (!value || Array.isArray(value) || typeof value !== "object") {
+    return {};
+  }
+  return { ...(value as Record<string, unknown>) };
+}
+
+async function assertSingleInventoryAccount(
+  type: string,
+  subcategory: string,
+  excludeId: string | null = null
+) {
+  if (String(type).trim() !== "asset" || String(subcategory).trim() !== "inventory") {
+    return;
+  }
+  const query: any = {
+    type: "asset",
+    subcategory: "inventory",
+    isActive: true,
+  };
+  if (excludeId) query._id = { $ne: new mongoose.Types.ObjectId(String(excludeId)) };
+  const existing = await LedgerAccount.findOne(query).lean();
+  if (existing) {
+    throw new Error("An active Inventory account already exists");
+  }
+}
+
 router.get("/accounts", authenticate, async (req: AuthenticatedRequest, res: Response) => {
   try {
     await connectDB();
-    const { type, search } = req.query as Record<string, string>;
+    const { type, subcategory, search } = req.query as Record<string, string>;
     const query: any = { isActive: true };
     if (type) query.type = String(type).trim();
+    if (subcategory) query.subcategory = String(subcategory).trim();
     if (search) {
       const text = String(search).trim();
       query.$or = [
@@ -77,6 +107,96 @@ router.get("/accounts", authenticate, async (req: AuthenticatedRequest, res: Res
   } catch (error) {
     console.error("Accounting accounts error:", error);
     return sendError(res, "Failed to fetch accounts", 500);
+  }
+});
+
+router.get("/ledger", authenticate, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    await connectDB();
+    const { accountId, dateFrom, dateTo } = req.query as Record<string, string>;
+    const isAllAccounts = !accountId || accountId === "all";
+    let selectedAccount: any = null;
+
+    if (!isAllAccounts) {
+      if (!mongoose.Types.ObjectId.isValid(accountId)) {
+        return sendError(res, "Ledger account is invalid", 400);
+      }
+      selectedAccount = await LedgerAccount.findOne({ _id: accountId, isActive: true }).lean();
+      if (!selectedAccount) {
+        return sendError(res, "Ledger account not found", 404);
+      }
+    }
+
+    const match: any = {};
+    if (!isAllAccounts && selectedAccount?._id) {
+      match["lines.account"] = selectedAccount._id;
+    }
+    if (dateFrom) {
+      const fromDate = new Date(dateFrom);
+      if (!Number.isNaN(fromDate.getTime())) {
+        match.date = { ...match.date, $gte: fromDate };
+      }
+    }
+    if (dateTo) {
+      const toDate = new Date(dateTo);
+      if (!Number.isNaN(toDate.getTime())) {
+        toDate.setHours(23, 59, 59, 999);
+        match.date = { ...match.date, $lte: toDate };
+      }
+    }
+
+    const accountLookupMatch: any = { "account.isActive": true };
+    if (!isAllAccounts && selectedAccount?._id) {
+      accountLookupMatch["account._id"] = selectedAccount._id;
+    }
+
+    const entries = await JournalEntry.aggregate([
+      { $match: match },
+      { $unwind: "$lines" },
+      {
+        $lookup: {
+          from: "ledgeraccounts",
+          localField: "lines.account",
+          foreignField: "_id",
+          as: "account",
+        },
+      },
+      { $unwind: "$account" },
+      { $match: accountLookupMatch },
+      { $sort: { date: 1, _id: 1 } },
+      {
+        $project: {
+          _id: 0,
+          date: 1,
+          reference: 1,
+          description: 1,
+          debit: "$lines.debit",
+          credit: "$lines.credit",
+          accountId: "$account._id",
+          accountCode: "$account.code",
+          accountTitle: "$account.title",
+          accountType: "$account.type",
+        },
+      },
+    ]);
+
+    const totals = entries.reduce(
+      (acc, row) => {
+        acc.debit += Number(row.debit || 0);
+        acc.credit += Number(row.credit || 0);
+        return acc;
+      },
+      { debit: 0, credit: 0 }
+    );
+
+    return sendSuccess(res, {
+      account: isAllAccounts ? null : selectedAccount,
+      entries,
+      totals,
+    });
+  } catch (error) {
+    console.error("Accounting ledger error:", error);
+    return sendError(res, "Failed to fetch ledger", 500);
   }
 });
 
@@ -146,14 +266,47 @@ router.get("/accounts/:id/ledger", authenticate, async (req: AuthenticatedReques
 router.post("/accounts", authenticate, async (req: AuthenticatedRequest, res: Response) => {
   try {
     await connectDB();
-    const { code, title, type, address, contact, openingBalance } = req.body as Record<string, unknown>;
+    const {
+      code,
+      title,
+      type,
+      subcategory,
+      currency,
+      supplierId,
+      supplierName,
+      paymentTerms,
+      isReconcilable,
+      metadata,
+      address,
+      contact,
+      openingBalance,
+    } = req.body as Record<string, unknown>;
     if (!code || !title || !type) {
       return sendError(res, "Code, title, and account type are required", 400);
+    }
+    const normalizedMetadata = sanitizeMetadata(metadata);
+    const accountType = String(type).trim();
+    const accountSubcategory = String(subcategory || "").trim();
+    await assertSingleInventoryAccount(accountType, accountSubcategory);
+    if (accountType === "asset" && accountSubcategory === "inventory") {
+      const invalidMetadata = INVENTORY_METADATA_BLACKLIST.filter((key) => normalizedMetadata[key] !== undefined);
+      if (invalidMetadata.length) {
+        return sendError(res, `Inventory account cannot contain item-level metadata: ${invalidMetadata.join(", ")}`, 400);
+      }
     }
     const account = await LedgerAccount.create({
       code: String(code).trim(),
       title: String(title).trim(),
-      type: String(type).trim(),
+      type: accountType,
+      subcategory: accountSubcategory,
+      currency: String(currency || "PKR").trim(),
+      supplierId: String(supplierId || "").trim(),
+      supplierName: String(
+        supplierName || normalizedMetadata.supplierName || ""
+      ).trim(),
+      paymentTerms: String(paymentTerms || "").trim(),
+      isReconcilable: Boolean(isReconcilable),
+      metadata: normalizedMetadata,
       address: String(address || "").trim(),
       contact: String(contact || "").trim(),
       openingBalance: Number(openingBalance || 0),
@@ -170,7 +323,21 @@ router.patch("/accounts/:id", authenticate, async (req: AuthenticatedRequest, re
   try {
     await connectDB();
     const { id } = req.params;
-    const { code, title, type, address, contact, openingBalance } = req.body as Record<string, unknown>;
+    const {
+      code,
+      title,
+      type,
+      subcategory,
+      currency,
+      supplierId,
+      supplierName,
+      paymentTerms,
+      isReconcilable,
+      metadata,
+      address,
+      contact,
+      openingBalance,
+    } = req.body as Record<string, unknown>;
     if (!code || !title || !type) {
       return sendError(res, "Code, title, and account type are required", 400);
     }
@@ -180,9 +347,29 @@ router.patch("/accounts/:id", authenticate, async (req: AuthenticatedRequest, re
       return sendError(res, "Account not found", 404);
     }
 
+    const normalizedMetadata = sanitizeMetadata(metadata);
+    const accountType = String(type).trim();
+    const accountSubcategory = String(subcategory || "").trim();
+    await assertSingleInventoryAccount(accountType, accountSubcategory, String(id));
+    if (accountType === "asset" && accountSubcategory === "inventory") {
+      const invalidMetadata = INVENTORY_METADATA_BLACKLIST.filter((key) => normalizedMetadata[key] !== undefined);
+      if (invalidMetadata.length) {
+        return sendError(res, `Inventory account cannot contain item-level metadata: ${invalidMetadata.join(", ")}`, 400);
+      }
+    }
+
     account.code = String(code).trim();
     account.title = String(title).trim();
-    account.type = String(type).trim();
+    account.type = accountType;
+    account.subcategory = accountSubcategory;
+    account.currency = String(currency || "PKR").trim();
+    account.supplierId = String(supplierId || "").trim();
+    account.supplierName = String(
+      supplierName || normalizedMetadata.supplierName || ""
+    ).trim();
+    account.paymentTerms = String(paymentTerms || "").trim();
+    account.isReconcilable = Boolean(isReconcilable);
+    account.metadata = normalizedMetadata;
     account.address = String(address || "").trim();
     account.contact = String(contact || "").trim();
 
@@ -347,9 +534,11 @@ router.get("/balance-sheet", authenticate, async (req: AuthenticatedRequest, res
   try {
     await connectDB();
     const { dateFrom, dateTo } = req.query as Record<string, string>;
+    
+    // Query ALL account types for complete balance sheet
     const accountQuery: any = {
       isActive: true,
-      type: { $in: ["asset", "bank", "receivable"] },
+      type: { $in: ["asset", "bank", "receivable", "liability", "equity"] },
     };
 
     const journalMatch: any = {};
@@ -414,9 +603,15 @@ router.get("/balance-sheet", authenticate, async (req: AuthenticatedRequest, res
       });
     }
 
+    // Calculate balance for each account
     const rows = accounts.map((account) => {
       const totals = totalsByAccount.get(String(account._id)) || { debit: 0, credit: 0 };
-      const balance = Number(account.openingBalance || 0) + totals.debit - totals.credit;
+      // Assets increase with debits, Liabilities/Equity increase with credits
+      const isAsset = ["asset", "bank", "receivable"].includes(account.type);
+      const balance = isAsset
+        ? Number(account.openingBalance || 0) + totals.debit - totals.credit
+        : Number(account.openingBalance || 0) + totals.credit - totals.debit;
+      
       return {
         accountId: String(account._id),
         code: account.code,
@@ -429,105 +624,175 @@ router.get("/balance-sheet", authenticate, async (req: AuthenticatedRequest, res
       };
     });
 
-    const totalAssets = rows.reduce((sum, row) => sum + row.balance, 0);
-    return sendSuccess(res, { rows, totalAssets });
+    // Separate into sections
+    const assets = rows.filter(r => ["asset", "bank", "receivable"].includes(r.type));
+    const liabilities = rows.filter(r => r.type === "liability");
+    const equity = rows.filter(r => r.type === "equity");
+
+    // Calculate section totals
+    const totalAssets = assets.reduce((sum, row) => sum + row.balance, 0);
+    const totalLiabilities = liabilities.reduce((sum, row) => sum + row.balance, 0);
+    const totalEquity = equity.reduce((sum, row) => sum + row.balance, 0);
+    
+    // Calculate Net Worth and verify accounting equation
+    const netWorth = totalAssets - totalLiabilities;
+    const liabilitiesAndEquity = totalLiabilities + totalEquity;
+    const isBalanced = Math.abs(totalAssets - liabilitiesAndEquity) < 0.01; // Allow 1 paisa rounding
+
+    return sendSuccess(res, {
+      assets,
+      liabilities,
+      equity,
+      totalAssets,
+      totalLiabilities,
+      totalEquity,
+      netWorth,
+      liabilitiesAndEquity,
+      isBalanced,
+    });
   } catch (error) {
     console.error("Accounting balance sheet error:", error);
     return sendError(res, "Failed to fetch balance sheet", 500);
   }
 });
 
-router.get("/balance-sheet", authenticate, async (req: AuthenticatedRequest, res: Response) => {
+/**
+ * GET /api/accounting/profit-loss
+ * Generate Profit & Loss Statement (Income Statement)
+ * Shows: Revenue, COGS, Gross Profit, Operating Expenses, Net Profit/Loss
+ */
+router.get("/profit-loss", authenticate, async (req: AuthenticatedRequest, res: Response) => {
   try {
     await connectDB();
+    
     const { dateFrom, dateTo } = req.query as Record<string, string>;
-    const accountQuery: any = {
-      isActive: true,
-      type: { $in: ["asset", "bank", "receivable"] },
-    };
-
-    const journalMatch: any = {};
-    if (dateFrom) {
-      const from = new Date(dateFrom);
-      if (!Number.isNaN(from.getTime())) journalMatch.date = { ...journalMatch.date, $gte: from };
+    
+    // Build date filter for journal entries
+    const dateFilter: any = {};
+    if (dateFrom) dateFilter.$gte = new Date(dateFrom);
+    if (dateTo) dateFilter.$lte = new Date(dateTo);
+    
+    // Fetch all journal entries in the date range
+    const journalQuery: any = { status: "posted" };
+    if (Object.keys(dateFilter).length > 0) {
+      journalQuery.date = dateFilter;
     }
-    if (dateTo) {
-      const to = new Date(dateTo);
-      if (!Number.isNaN(to.getTime())) {
-        to.setHours(23, 59, 59, 999);
-        journalMatch.date = { ...journalMatch.date, $lte: to };
+    
+    const entries = await JournalEntry.find(journalQuery).lean();
+    
+    // Aggregate by account
+    const accountTotals = new Map<string, { debit: number; credit: number }>();
+    
+    for (const entry of entries) {
+      for (const line of entry.lines || []) {
+        const accountId = String(line.account);
+        const current = accountTotals.get(accountId) || { debit: 0, credit: 0 };
+        current.debit += Number(line.debit || 0);
+        current.credit += Number(line.credit || 0);
+        accountTotals.set(accountId, current);
       }
     }
-
-    const accounts = await LedgerAccount.find(accountQuery).sort({ code: 1 }).lean();
-    const accountIds = accounts.map((account) => account._id);
-
-    const aggregationPipeline: any[] = [];
-    if (Object.keys(journalMatch).length) {
-      aggregationPipeline.push({ $match: journalMatch });
-    }
-    aggregationPipeline.push(
-      { $unwind: "$lines" },
-      { $match: { "lines.account": { $in: accountIds } } },
-      {
-        $group: {
-          _id: "$lines.account",
-          totalDebit: { $sum: "$lines.debit" },
-          totalCredit: { $sum: "$lines.credit" },
-        },
-      },
-      {
-        $lookup: {
-          from: LedgerAccount.collection.name,
-          localField: "_id",
-          foreignField: "_id",
-          as: "account",
-        },
-      },
-      { $unwind: "$account" },
-      {
-        $project: {
-          accountId: { $toString: "$_id" },
-          code: "$account.code",
-          title: "$account.title",
-          type: "$account.type",
-          openingBalance: "$account.openingBalance",
-          currentBalance: "$account.currentBalance",
-          debitTotal: "$totalDebit",
-          creditTotal: "$totalCredit",
-        },
+    
+    // Fetch all accounts
+    const accounts = await LedgerAccount.find({ isActive: true }).lean();
+    const accountMap = new Map(accounts.map(a => [a._id.toString(), a]));
+    
+    // Categorize accounts and calculate balances
+    const revenueAccounts: any[] = [];
+    const cogsAccounts: any[] = [];
+    const expenseAccounts: any[] = [];
+    
+    let totalRevenue = 0;
+    let totalCOGS = 0;
+    let totalExpenses = 0;
+    
+    for (const [accountId, totals] of accountTotals.entries()) {
+      const account = accountMap.get(accountId);
+      if (!account) continue;
+      
+      // Revenue accounts: Credit increases, Debit decreases
+      // Balance = Credits - Debits (positive = revenue earned)
+      if (account.type === "revenue") {
+        const balance = totals.credit - totals.debit;
+        if (balance !== 0) {
+          revenueAccounts.push({
+            accountId: account._id,
+            code: account.code,
+            title: account.title,
+            subcategory: account.subcategory,
+            debitTotal: totals.debit,
+            creditTotal: totals.credit,
+            balance,
+          });
+          totalRevenue += balance;
+        }
       }
-    );
-
-    const aggregatedRows = await JournalEntry.aggregate(aggregationPipeline);
-    const totalsByAccount = new Map<string, { debit: number; credit: number }>();
-    for (const row of aggregatedRows) {
-      totalsByAccount.set(String(row.accountId), {
-        debit: Number(row.debitTotal || 0),
-        credit: Number(row.creditTotal || 0),
-      });
+      
+      // COGS accounts: Debit increases, Credit decreases
+      // Balance = Debits - Credits (positive = cost incurred)
+      else if (account.type === "expense" && account.subcategory === "cogs") {
+        const balance = totals.debit - totals.credit;
+        if (balance !== 0) {
+          cogsAccounts.push({
+            accountId: account._id,
+            code: account.code,
+            title: account.title,
+            subcategory: account.subcategory,
+            debitTotal: totals.debit,
+            creditTotal: totals.credit,
+            balance,
+          });
+          totalCOGS += balance;
+        }
+      }
+      
+      // Other expense accounts: Debit increases, Credit decreases
+      // Balance = Debits - Credits (positive = expense incurred)
+      else if (account.type === "expense" && account.subcategory !== "cogs") {
+        const balance = totals.debit - totals.credit;
+        if (balance !== 0) {
+          expenseAccounts.push({
+            accountId: account._id,
+            code: account.code,
+            title: account.title,
+            subcategory: account.subcategory,
+            debitTotal: totals.debit,
+            creditTotal: totals.credit,
+            balance,
+          });
+          totalExpenses += balance;
+        }
+      }
     }
-
-    const rows = accounts.map((account) => {
-      const totals = totalsByAccount.get(String(account._id)) || { debit: 0, credit: 0 };
-      const balance = Number(account.openingBalance || 0) + totals.debit - totals.credit;
-      return {
-        accountId: String(account._id),
-        code: account.code,
-        title: account.title,
-        type: account.type,
-        openingBalance: Number(account.openingBalance || 0),
-        debitTotal: totals.debit,
-        creditTotal: totals.credit,
-        balance,
-      };
+    
+    // Sort accounts by code
+    revenueAccounts.sort((a, b) => a.code.localeCompare(b.code));
+    cogsAccounts.sort((a, b) => a.code.localeCompare(b.code));
+    expenseAccounts.sort((a, b) => a.code.localeCompare(b.code));
+    
+    // Calculate P&L metrics
+    const grossProfit = totalRevenue - totalCOGS;
+    const netProfit = grossProfit - totalExpenses;
+    const grossProfitMargin = totalRevenue > 0 ? (grossProfit / totalRevenue) * 100 : 0;
+    const netProfitMargin = totalRevenue > 0 ? (netProfit / totalRevenue) * 100 : 0;
+    
+    return sendSuccess(res, {
+      dateFrom: dateFrom || null,
+      dateTo: dateTo || null,
+      revenue: revenueAccounts,
+      cogs: cogsAccounts,
+      expenses: expenseAccounts,
+      totalRevenue,
+      totalCOGS,
+      totalExpenses,
+      grossProfit,
+      netProfit,
+      grossProfitMargin,
+      netProfitMargin,
     });
-
-    const totalAssets = rows.reduce((sum, row) => sum + row.balance, 0);
-    return sendSuccess(res, { rows, totalAssets });
   } catch (error) {
-    console.error("Accounting balance sheet error:", error);
-    return sendError(res, "Failed to fetch balance sheet", 500);
+    console.error("Profit & Loss error:", error);
+    return sendError(res, "Failed to generate Profit & Loss statement", 500);
   }
 });
 

@@ -8,6 +8,8 @@
     "dev": "nodemon --exec tsx src/index.ts",
     "build": "tsc",
     "start": "node dist/index.js",
+    "seed:accounts": "tsx scripts/seed-default-accounts.ts",
+    "migrate:link-accounts": "tsx scripts/migrate-link-suppliers-customers-to-accounts.ts",
     "seed:admin": "tsx scripts/seed-admin.js",
     "seed:employees": "tsx scripts/seed-employees.js",
     "seed:menu": "tsx scripts/seed-menu.js",

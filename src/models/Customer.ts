@@ -20,6 +20,7 @@ const CustomerSchema = new mongoose.Schema(
     lastVisit: { type: Date, default: null },
     birthdayOfferSent: { type: Boolean, default: false },
     birthdayOfferSentYear: { type: Number, default: null },
+    ledgerAccountId: { type: mongoose.Schema.Types.ObjectId, ref: "LedgerAccount", default: null },
   },
   { timestamps: true }
 );

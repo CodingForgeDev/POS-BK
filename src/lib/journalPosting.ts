@@ -1,6 +1,8 @@
 import mongoose, { ClientSession } from "mongoose";
 import LedgerAccount from "../models/LedgerAccount";
 import JournalEntry from "../models/JournalEntry";
+import Setting from "../models/Setting";
+import Period from "../models/Period";
 
 export const normalizeJournalLines = (lines: any[]) => {
   return (lines || [])
@@ -27,6 +29,27 @@ export const findLedgerAccount = async (filter: Record<string, unknown>): Promis
   return LedgerAccount.findOne({ isActive: true, ...filter }).sort({ code: 1 }).lean();
 };
 
+export async function getSettingValue<T = unknown>(key: string): Promise<T | null> {
+  const doc = await (Setting as any).findOne({ key }).lean();
+  if (!doc) return null;
+  return doc.value as T;
+}
+
+export async function resolveLedgerAccountFromSetting(settingKey: string): Promise<any | null> {
+  const accountId = String(await getSettingValue<string>(settingKey) || "").trim();
+  if (!accountId || !mongoose.Types.ObjectId.isValid(accountId)) return null;
+  return LedgerAccount.findOne({ _id: new mongoose.Types.ObjectId(accountId), isActive: true }).lean();
+}
+
+export async function resolveLedgerAccountBySettingOrFallback(
+  settingKey: string,
+  fallbackLookups: Array<Record<string, unknown>>
+): Promise<any | null> {
+  const account = await resolveLedgerAccountFromSetting(settingKey);
+  if (account) return account;
+  return resolveFirstLedgerAccount(fallbackLookups);
+}
+
 export async function findLedgerAccountByFallback(
   primary: Record<string, unknown>,
   ...fallbacks: Array<Record<string, unknown>>
@@ -38,6 +61,194 @@ export async function findLedgerAccountByFallback(
     if (fallbackAccount) return fallbackAccount;
   }
   return null;
+}
+
+async function resolveFirstLedgerAccount(
+  lookups: Array<Record<string, unknown>>
+): Promise<any | null> {
+  for (const lookup of lookups) {
+    const account = await findLedgerAccount(lookup);
+    if (account) return account;
+  }
+  return null;
+}
+
+function buildLooseRegexFromCategory(category: string): RegExp | null {
+  const normalized = String(category || "").trim().toLowerCase();
+  if (!normalized) return null;
+  const escaped = normalized.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const tokens = escaped.split(/[^a-z0-9]+/i).filter(Boolean);
+  if (!tokens.length) return null;
+  return new RegExp(tokens.join("|"), "i");
+}
+
+export async function resolveExpenseDebitAccount(
+  category: string
+): Promise<any | null> {
+  const categoryRegex = buildLooseRegexFromCategory(category);
+  const isEmployeeExpense = /employee|salary|wage|payroll|staff/i.test(
+    category || ""
+  );
+  const lookups: Array<Record<string, unknown>> = [];
+
+  if (isEmployeeExpense) {
+    lookups.push(
+      { type: "expense", title: /employee|salary|wage|payroll|staff/i },
+      { type: "expense", subcategory: "operating", title: /employee|salary|wage|payroll|staff/i }
+    );
+  }
+  if (categoryRegex) {
+    lookups.push(
+      { type: "expense", title: categoryRegex },
+      { type: "expense", "metadata.category": String(category || "").trim() }
+    );
+  }
+  lookups.push({ type: "expense", subcategory: "operating" }, { type: "expense" });
+
+  return resolveFirstLedgerAccount(lookups);
+}
+
+export async function resolveExpensePaymentAccount(
+  paymentMethod: string
+): Promise<any | null> {
+  const method = String(paymentMethod || "").toLowerCase();
+  
+  // Priority 1: Check Settings for default cash/bank account
+  if (method === "bank_transfer" || method === "card") {
+    const settingAccount = await resolveLedgerAccountFromSetting("defaultBankAccountId");
+    if (settingAccount) return settingAccount;
+  } else {
+    // For cash payments, try cash account setting first
+    const settingAccount = await resolveLedgerAccountFromSetting("defaultCashAccountId");
+    if (settingAccount) return settingAccount;
+  }
+  
+  // Priority 2: Fallback to type/title matching
+  if (method === "bank_transfer") {
+    return resolveFirstLedgerAccount([
+      { type: { $in: ["asset", "bank"] }, title: /bank|cash at bank/i },
+      { type: { $in: ["asset", "bank"] }, subcategory: "cash" },
+      { type: { $in: ["asset", "bank"] } },
+    ]);
+  }
+  if (method === "card") {
+    return resolveFirstLedgerAccount([
+      { type: { $in: ["asset", "bank"] }, title: /card|bank/i },
+      { type: { $in: ["asset", "bank"] } },
+    ]);
+  }
+  return resolveFirstLedgerAccount([
+    { type: { $in: ["asset", "bank"] }, title: /cash|petty cash|cash in hand/i },
+    { type: { $in: ["asset", "bank"] }, subcategory: "cash" },
+    { type: { $in: ["asset", "bank"] } },
+  ]);
+}
+
+export async function resolvePurchasePostingAccounts(
+  supplierId: string,
+  options?: { paymentMethod?: string; paymentAccountId?: string }
+): Promise<{ inventoryAccount: any | null; paymentAccount: any | null }> {
+  const normalizedSupplierId = String(supplierId || "").trim();
+  const method = String(options?.paymentMethod || "credit").toLowerCase();
+
+  let paymentAccount: any | null = null;
+  if (options?.paymentAccountId && mongoose.Types.ObjectId.isValid(options.paymentAccountId)) {
+    paymentAccount = await LedgerAccount.findOne({ _id: new mongoose.Types.ObjectId(options.paymentAccountId), isActive: true }).lean();
+  }
+
+  // Priority 1: Supplier-specific payable account
+  const supplierSpecificPayable = normalizedSupplierId
+    ? await resolveFirstLedgerAccount([
+        { type: "liability", subcategory: "accounts-payable", supplierId: normalizedSupplierId },
+        { type: "liability", subcategory: "payable", supplierId: normalizedSupplierId },
+        { type: "liability", supplierId: normalizedSupplierId },
+      ])
+    : null;
+
+  // Priority 2: Default A/P from Settings, or fallback to generic payable
+  const defaultPayable = supplierSpecificPayable
+    || (await resolveLedgerAccountBySettingOrFallback("defaultAPAccountId", [
+      { type: "liability", subcategory: "accounts-payable" },
+      { type: "liability", subcategory: "payable", title: /payable|supplier|creditor/i },
+      { type: "liability", subcategory: "payable" },
+      { type: "liability" },
+    ]));
+
+  if (method === "cash") {
+    paymentAccount = paymentAccount || await resolveExpensePaymentAccount("cash");
+  } else {
+    paymentAccount = paymentAccount || defaultPayable;
+  }
+
+  const inventoryAccount = await resolveLedgerAccountBySettingOrFallback("defaultInventoryAccountId", [
+    { type: "asset", subcategory: "inventory" },
+    { title: /inventory|stock/i },
+    { type: "asset" },
+  ]);
+
+  return { inventoryAccount, paymentAccount };
+}
+
+export async function resolvePosPostingAccounts(
+  paymentMethod: string
+): Promise<{
+  paymentAccount: any | null;
+  revenueAccount: any | null;
+  taxAccount: any | null;
+  serviceAccount: any | null;
+  discountAccount: any | null;
+  cogsAccount: any | null;
+  inventoryAccount: any | null;
+}> {
+  const paymentAccount = await resolveExpensePaymentAccount(paymentMethod);
+  
+  const revenueAccount = await resolveLedgerAccountBySettingOrFallback("defaultSalesAccountId", [
+    { type: "revenue", subcategory: "sales" },
+    { type: "revenue", title: /sales|revenue/i },
+    { type: "revenue" },
+  ]);
+  
+  const taxAccount = await resolveLedgerAccountBySettingOrFallback("defaultTaxPayableAccountId", [
+    { type: "liability", subcategory: "tax_payable" },
+    { type: "liability", subcategory: "tax-payable" },
+    { type: "liability", title: /tax|gst|vat/i },
+    { type: "liability" },
+  ]);
+  
+  const serviceAccount = await resolveLedgerAccountBySettingOrFallback("defaultServiceChargeAccountId", [
+    { type: "revenue", subcategory: "service" },
+    { type: "revenue", title: /service/i },
+    { type: "revenue" },
+  ]);
+  
+  const discountAccount = await resolveLedgerAccountBySettingOrFallback("defaultDiscountAccountId", [
+    { type: "expense", subcategory: "discounts" },
+    { type: "expense", title: /discount|allowance|rebate/i },
+    { type: "revenue", title: /discount|allowance|rebate/i },
+    { type: "expense" },
+  ]);
+  
+  const cogsAccount = await resolveLedgerAccountBySettingOrFallback("defaultCogsAccountId", [
+    { type: "expense", subcategory: "cogs" },
+    { type: "expense", title: /cost of goods sold|cogs|cost/i },
+    { type: "expense" },
+  ]);
+  
+  const inventoryAccount = await resolveLedgerAccountBySettingOrFallback("defaultInventoryAccountId", [
+    { type: "asset", subcategory: "inventory" },
+    { title: /inventory|stock/i },
+    { type: "asset" },
+  ]);
+
+  return {
+    paymentAccount,
+    revenueAccount,
+    taxAccount,
+    serviceAccount,
+    discountAccount,
+    cogsAccount,
+    inventoryAccount,
+  };
 }
 
 export async function createReturnJournalEntry(returnRecord: any, session: ClientSession | null = null) {
@@ -160,6 +371,22 @@ export async function createJournalEntryRecord(payload: Record<string, unknown>)
 
   if (!date || !Array.isArray(lines) || lines.length === 0) {
     throw new Error("Date and at least one journal line are required");
+  }
+
+  // Check if posting to a closed or locked period (unless it's a closing entry)
+  if (source !== "CLOSING") {
+    const entryDate = new Date(date as string | Date);
+    const closedPeriodQuery = Period.findOne({
+      startDate: { $lte: entryDate },
+      endDate: { $gte: entryDate },
+      status: { $in: ["closed", "locked"] },
+    });
+    if (session) closedPeriodQuery.session(session);
+    const closedPeriod = await closedPeriodQuery;
+    
+    if (closedPeriod) {
+      throw new Error(`Cannot post to ${closedPeriod.status} period: ${closedPeriod.name}. Reopen the period first or change the entry date.`);
+    }
   }
 
   const normalizedLines = normalizeJournalLines(lines as any[]);

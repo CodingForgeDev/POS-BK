@@ -103,7 +103,7 @@ export function sendError(
   status = 500,
   data?: unknown
 ): Response {
-  const body: Record<string, unknown> = { success: false, message };
+  const body: Record<string, unknown> = { success: false, message, error: message };
   if (data !== undefined) body.data = data;
   return res.status(status).json(body);
 }

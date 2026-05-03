@@ -3,8 +3,87 @@ import { authenticate, AuthenticatedRequest } from "../middleware/auth";
 import { connectDB } from "../lib/mongodb";
 import { sendSuccess, sendError } from "../lib/utils";
 import Customer from "../models/Customer";
+import LedgerAccount from "../models/LedgerAccount";
+import mongoose from "mongoose";
 
 const router: Router = Router();
+
+/**
+ * Get next available GL code in the 1300-1399 range for customer A/R accounts
+ */
+async function getNextCustomerAccountCode(): Promise<string> {
+  const start = 1300;
+  const end = 1399;
+  
+  const existingAccounts = await LedgerAccount.find({
+    code: { $gte: String(start), $lte: String(end) },
+  }).sort({ code: 1 }).lean();
+  
+  const usedCodes = new Set(existingAccounts.map(a => parseInt(a.code)));
+  
+  for (let code = start; code <= end; code++) {
+    if (!usedCodes.has(code)) {
+      return String(code);
+    }
+  }
+  
+  throw new Error("No available GL codes in range 1300-1399 for customer accounts");
+}
+
+/**
+ * Create or update ledger account for customer
+ */
+async function upsertCustomerLedgerAccount(
+  customerId: string,
+  customerName: string,
+  address: string,
+  phone: string,
+  email: string,
+  existingLedgerAccountId?: string | null
+): Promise<string> {
+  if (existingLedgerAccountId && mongoose.Types.ObjectId.isValid(existingLedgerAccountId)) {
+    // Update existing ledger account
+    const updated = await LedgerAccount.findByIdAndUpdate(
+      existingLedgerAccountId,
+      {
+        title: `A/R - ${customerName}`,
+        address: address || "",
+        contact: phone || "",
+        metadata: {
+          autoCreated: true,
+          linkedEntity: "customer",
+          linkedEntityId: customerId,
+          email: email || "",
+        },
+      },
+      { new: true }
+    );
+    if (updated) return updated._id.toString();
+  }
+  
+  // Create new ledger account
+  const code = await getNextCustomerAccountCode();
+  const ledgerAccount = await LedgerAccount.create({
+    code,
+    title: `A/R - ${customerName}`,
+    type: "receivable",
+    subcategory: "accounts-receivable",
+    currency: "PKR",
+    address: address || "",
+    contact: phone || "",
+    openingBalance: 0,
+    currentBalance: 0,
+    isActive: true,
+    metadata: {
+      autoCreated: true,
+      linkedEntity: "customer",
+      linkedEntityId: customerId,
+      email: email || "",
+    },
+  });
+  
+  return ledgerAccount._id.toString();
+}
 
 router.get("/", authenticate, async (req: AuthenticatedRequest, res: Response) => {
   try {
@@ -51,6 +130,27 @@ router.post("/", authenticate, async (req: AuthenticatedRequest, res: Response) 
     req.body.phone = String(phone).replace(/[^+\d]/g, "");
 
     const customer = await Customer.create(req.body);
+    
+    // Auto-create A/R ledger account for customer
+    try {
+      const ledgerAccountId = await upsertCustomerLedgerAccount(
+        customer._id.toString(),
+        customer.name,
+        customer.address || "",
+        customer.phone || "",
+        customer.email || ""
+      );
+      
+      // Link ledger account to customer
+      customer.ledgerAccountId = new mongoose.Types.ObjectId(ledgerAccountId) as any;
+      await customer.save();
+      
+      console.log(`✅ Auto-created A/R account for customer: ${customer.name} (GL ${ledgerAccountId})`);
+    } catch (ledgerError) {
+      console.error("⚠️  Failed to create customer ledger account:", ledgerError);
+      // Continue without failing - customer is still created
+    }
+    
     return sendSuccess(res, customer, "Customer created successfully", 201);
   } catch (error: any) {
     if (error.code === 11000 && error.keyPattern?.phone) {
@@ -87,6 +187,23 @@ router.patch("/:id", authenticate, async (req: AuthenticatedRequest, res: Respon
 
     const customer = await Customer.findByIdAndUpdate(req.params.id, req.body, { new: true, runValidators: true });
     if (!customer) return sendError(res, "Customer not found", 404);
+    
+    // Update linked ledger account if name or details changed
+    if (customer.ledgerAccountId) {
+      try {
+        await upsertCustomerLedgerAccount(
+          customer._id.toString(),
+          customer.name,
+          customer.address || "",
+          customer.phone || "",
+          customer.email || "",
+          customer.ledgerAccountId.toString()
+        );
+      } catch (ledgerError) {
+        console.error("⚠️  Failed to update customer ledger account:", ledgerError);
+      }
+    }
+    
     return sendSuccess(res, customer, "Customer updated successfully");
   } catch (error: any) {
     if (error.code === 11000 && error.keyPattern?.phone) {

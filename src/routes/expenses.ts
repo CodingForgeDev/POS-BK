@@ -3,7 +3,11 @@ import { authenticate, AuthenticatedRequest } from "../middleware/auth";
 import { connectDB } from "../lib/mongodb";
 import { sendSuccess, sendError } from "../lib/utils";
 import Expense from "../models/Expense";
-import { createJournalEntryRecord, findLedgerAccount } from "../lib/journalPosting";
+import {
+  createJournalEntryRecord,
+  resolveExpenseDebitAccount,
+  resolveExpensePaymentAccount,
+} from "../lib/journalPosting";
 
 const router: Router = Router();
 
@@ -11,8 +15,12 @@ async function postExpenseJournalEntry(expense: any) {
   const amount = Number(expense.amount || 0);
   if (!amount || !expense._id) return;
 
-  const expenseAccount = await findLedgerAccount({ type: "expense" });
-  const paymentAccount = await findLedgerAccount({ type: { $in: ["asset", "bank"] } });
+  const expenseAccount = await resolveExpenseDebitAccount(
+    String(expense.category || "")
+  );
+  const paymentAccount = await resolveExpensePaymentAccount(
+    String(expense.paymentMethod || "")
+  );
   if (!expenseAccount || !paymentAccount) {
     console.warn("Skipped expense journal entry: missing expense or payment account mapping");
     return;

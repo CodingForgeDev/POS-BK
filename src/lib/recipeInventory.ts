@@ -7,7 +7,10 @@ import InventoryConsumption from "../models/InventoryConsumption";
 import InventoryReservation from "../models/InventoryReservation";
 import { InsufficientStockError } from "./inventoryErrors";
 import { deductInventoryFifo, type FifoAllocation } from "./inventoryFifo";
-import { createJournalEntryRecord, findLedgerAccount } from "./journalPosting";
+import {
+  createJournalEntryRecord,
+  resolvePosPostingAccounts,
+} from "./journalPosting";
 
 const UNIT_GROUP: Record<string, string> = {
   ml: "volume",
@@ -125,13 +128,6 @@ function normalizeProductRef(product: unknown): mongoose.Types.ObjectId {
   return new mongoose.Types.ObjectId(String(product));
 }
 
-async function findLedgerAccountByFallback(primary: Record<string, unknown>, fallback?: Record<string, unknown>): Promise<any | null> {
-  const account = await findLedgerAccount(primary);
-  if (account) return account;
-  if (fallback) return findLedgerAccount(fallback);
-  return null;
-}
-
 async function postPOSOrderJournalEntry(
   order: any,
   invoice: any,
@@ -148,24 +144,15 @@ async function postPOSOrderJournalEntry(
   const paymentAccountDiscountAmount = Number(invoice.paymentAccountDiscountAmount || 0);
   if (!total || total <= 0) return;
 
-  const paymentAccount = await findLedgerAccountByFallback(
-    { type: { $in: ["asset", "bank"] }, title: /cash|bank/i },
-    { type: { $in: ["asset", "bank"] } }
-  );
-  const revenueAccount = await findLedgerAccountByFallback(
-    { type: "revenue", title: /sales|revenue/i },
-    { type: "revenue" }
-  );
-  const taxAccount = await findLedgerAccountByFallback(
-    { type: "liability", title: /tax/i },
-    { type: "liability" }
-  );
-  const serviceAccount = serviceChargeAmount > 0
-    ? await findLedgerAccountByFallback(
-        { type: "revenue", title: /service/i },
-        { type: "revenue" }
-      )
-    : null;
+  const {
+    paymentAccount,
+    revenueAccount,
+    taxAccount,
+    serviceAccount,
+    discountAccount: resolvedDiscountAccount,
+    cogsAccount: resolvedCogsAccount,
+    inventoryAccount: resolvedInventoryAccount,
+  } = await resolvePosPostingAccounts(String(invoice?.paymentMethod || ""));
 
   const costAmount = allocations.reduce((sum, line) => {
     return (
@@ -180,22 +167,13 @@ async function postPOSOrderJournalEntry(
   let cogsAccount: any = null;
   let inventoryAccount: any = null;
   if (costAmount > 0) {
-    cogsAccount = await findLedgerAccountByFallback(
-      { type: "expense", title: /cost of goods sold|cogs|cost/i },
-      { type: "expense" }
-    );
-    inventoryAccount = await findLedgerAccountByFallback(
-      { title: /inventory/i },
-      { type: "asset" }
-    );
+    cogsAccount = resolvedCogsAccount;
+    inventoryAccount = resolvedInventoryAccount;
   }
 
   let discountAccount = null as any;
   if (discountAmount > 0 || paymentAccountDiscountAmount > 0) {
-    discountAccount = await findLedgerAccountByFallback(
-      { title: /discount|allowance|rebate/i },
-      { type: "expense" }
-    );
+    discountAccount = resolvedDiscountAccount;
     if (!discountAccount) {
       discountAccount = revenueAccount;
     }

@@ -25,9 +25,17 @@ import attendanceRoutes from "./routes/attendance";
 import accountingRoutes from "./routes/accounting";
 import settingsRoutes from "./routes/settings";
 import rolesRoutes from "./routes/roles";
+import paymentsRoutes from "./routes/payments";
+import periodsRoutes from "./routes/periods";
+import auditLogsRoutes from "./routes/audit-logs";
 import zktecoIclockRoutes from "./routes/zkteco/iclock";
 import zkPullRoutes from "./routes/zkteco/zkPull";
 import { initZkPull } from "./integrations/zkteco/zkPullScheduler";
+import LedgerAccount from "./models/LedgerAccount";
+import { exec } from "child_process";
+import { promisify } from "util";
+
+const execAsync = promisify(exec);
 
 const app: express.Application = express();
 // Avoid 304 Not Modified responses for device calls (some ZKTeco firmwares expect the body).
@@ -77,6 +85,9 @@ app.use("/api/discounts", discountsRoutes);
 app.use("/api/billing", billingRoutes);
 app.use("/api/reports", reportsRoutes);
 app.use("/api/accounting", accountingRoutes);
+app.use("/api/payments", paymentsRoutes);
+app.use("/api/periods", periodsRoutes);
+app.use("/api/audit-logs", auditLogsRoutes);
 app.use("/api/attendance", attendanceRoutes);
 app.use("/api/settings", settingsRoutes);
 app.use("/api/roles", rolesRoutes);
@@ -114,7 +125,28 @@ app.use((err: unknown, _req: express.Request, res: express.Response, _next: expr
 });
 
 connectDB()
-  .then(() => {
+  .then(async () => {
+    // ──────────────────────────────────────────────────────────────────────────
+    // Auto-initialize default Chart of Accounts if database is empty
+    // ──────────────────────────────────────────────────────────────────────────
+    try {
+      const accountCount = await LedgerAccount.countDocuments();
+      if (accountCount === 0) {
+        console.log("📊 No ledger accounts found. Initializing default chart of accounts...");
+        const { stdout, stderr } = await execAsync("npx tsx scripts/seed-default-accounts.ts", {
+          cwd: __dirname + "/..",
+        });
+        if (stdout) console.log(stdout);
+        if (stderr) console.error(stderr);
+      } else {
+        console.log(`ℹ️  Found ${accountCount} ledger accounts. Skipping auto-initialization.`);
+      }
+    } catch (error) {
+      console.error("⚠️  Failed to auto-initialize default accounts:", error);
+      console.error("⚠️  You may need to run: npm run seed-accounts");
+    }
+    // ──────────────────────────────────────────────────────────────────────────
+
     const apiServer = http.createServer(app);
     const zktecoServer = http.createServer(app);
 

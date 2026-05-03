@@ -98,6 +98,14 @@ async function fetchPopulatedInvoice(id: any) {
   return sanitizeInvoice(doc);
 }
 
+function generateRefundRequestCode() {
+  const now = new Date();
+  const dateCode = `${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, "0")}${String(now.getDate()).padStart(2, "0")}`;
+  const timeCode = `${String(now.getHours()).padStart(2, "0")}${String(now.getMinutes()).padStart(2, "0")}${String(now.getSeconds()).padStart(2, "0")}`;
+  const randomSegment = String(Math.floor(Math.random() * 9000) + 1000);
+  return `RF-${dateCode}-${timeCode}-${randomSegment}`;
+}
+
 async function reverseSaleJournalForInvoice(invoice: any, postedBy: any) {
   if (!invoice || !invoice.order) {
     return null;
@@ -382,6 +390,7 @@ router.post(
       // may be missing on old documents. findByIdAndUpdate only touches the
       // fields we explicitly set, so old item data is never re-validated.
       const refundRequestPayload = {
+        code: generateRefundRequestCode(),
         requestedBy: req.user.id,
         requestedAt: new Date(),
         notes,

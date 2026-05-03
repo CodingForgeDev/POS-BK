@@ -4,6 +4,7 @@ const SettingSchema = new mongoose.Schema(
   {
     key: { type: String, required: true, unique: true },
     value: mongoose.Schema.Types.Mixed,
+    description: { type: String, default: "" },
   },
   { timestamps: true }
 );

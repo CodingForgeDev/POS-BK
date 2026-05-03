@@ -10,6 +10,20 @@ import { deductInventoryFifo } from "../lib/inventoryFifo";
 import { recalculateProductCostPriceForInventoryItem } from "../lib/recipeInventory";
 import { InsufficientStockError } from "../lib/inventoryErrors";
 
+async function generateUniqueInventorySku(): Promise<string> {
+  const now = new Date();
+  const dateCode = `${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, "0")}${String(now.getDate()).padStart(2, "0")}`;
+
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    const randomSegment = String(Math.floor(Math.random() * 9000) + 1000);
+    const sku = `SKU-${dateCode}-${randomSegment}`;
+    const exists = await Inventory.exists({ sku });
+    if (!exists) return sku;
+  }
+
+  return `SKU-${dateCode}-${Date.now()}`;
+}
+
 const router: Router = Router();
 
 router.get("/", authenticate, async (req: AuthenticatedRequest, res: Response) => {
@@ -78,7 +92,7 @@ router.post("/", authenticate, async (req: AuthenticatedRequest, res: Response) 
       notes,
     } = req.body as Record<string, unknown>;
 
-    const normalizedSku = typeof sku === "string" && sku.trim() !== "" ? sku.trim() : undefined;
+    const normalizedSku = typeof sku === "string" && sku.trim() !== "" ? sku.trim() : await generateUniqueInventorySku();
     const normalizedSupplierName = typeof supplierName === "string" ? supplierName.trim() : "";
 
     const item = await Inventory.create({

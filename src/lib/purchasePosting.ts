@@ -3,6 +3,7 @@ import Purchase from "../models/Purchase";
 import StockLayer from "../models/StockLayer";
 import Inventory from "../models/Inventory";
 import Supplier from "../models/Supplier";
+import Setting from "../models/Setting";
 import { recalculateProductCostPriceForInventoryItem } from "./recipeInventory";
 
 export function weightedAverageCost(currentStock: number, currentCostPerUnit: number, addQty: number, addUnitCost: number): number {
@@ -11,6 +12,46 @@ export function weightedAverageCost(currentStock: number, currentCostPerUnit: nu
   const newStock = cs + add;
   if (newStock <= 0) return Math.max(0, Number(addUnitCost) || 0);
   return (cs * (Number(currentCostPerUnit) || 0) + add * (Number(addUnitCost) || 0)) / newStock;
+}
+
+/**
+ * Generate auto-incrementing purchase reference number
+ * Format: PUR-YYYYMM-####
+ * Example: PUR-202605-0001
+ */
+async function generatePurchaseReference(session: ClientSession | null): Promise<string> {
+  const now = new Date();
+  const yearMonth = `${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, '0')}`;
+  const counterKey = `purchase_counter_${yearMonth}`;
+  
+  // Get current counter or initialize to 0
+  const settingQuery = Setting.findOne({ key: counterKey });
+  if (session) settingQuery.session(session);
+  let setting = await settingQuery;
+  
+  let nextNumber = 1;
+  if (setting) {
+    nextNumber = Number(setting.value || 0) + 1;
+    const updateQuery = Setting.updateOne(
+      { key: counterKey },
+      { $set: { value: nextNumber, description: `Purchase reference counter for ${yearMonth}` } }
+    );
+    if (session) updateQuery.session(session);
+    await updateQuery;
+  } else {
+    // Create new counter
+    const createOptions = session ? { session } : undefined;
+    await Setting.create(
+      [{
+        key: counterKey,
+        value: nextNumber,
+        description: `Purchase reference counter for ${yearMonth}`
+      }],
+      createOptions
+    );
+  }
+  
+  return `PUR-${yearMonth}-${String(nextNumber).padStart(4, '0')}`;
 }
 
 export type PostPurchaseLineInput = {
@@ -28,6 +69,7 @@ export async function postPurchaseInSession(
     referenceNumber?: string;
     receivedAt: Date;
     notes?: string;
+    paymentMethod?: string;
     lines: PostPurchaseLineInput[];
     userId: string;
   }
@@ -72,16 +114,23 @@ export async function postPurchaseInSession(
 
   const totalAmount = normalized.reduce((s, l) => s + l.quantity * l.unitCost, 0);
 
+  // Generate reference number if not provided
+  const finalReference = referenceNumber && referenceNumber.trim() 
+    ? referenceNumber.trim() 
+    : await generatePurchaseReference(session);
+
   const purchaseOptions = session ? { session } : undefined;
+  const normalizedPaymentMethod = String(input.paymentMethod || "credit").toLowerCase();
   const [purchaseDoc] = await Purchase.create(
     [
       {
         supplier: supplierId ? new mongoose.Types.ObjectId(supplierId) : null,
-        referenceNumber: referenceNumber ?? "",
+        referenceNumber: finalReference,
         receivedAt,
         lines: normalized,
         totalAmount,
         notes: notes ?? "",
+        paymentMethod: ["cash", "credit"].includes(normalizedPaymentMethod) ? normalizedPaymentMethod : "credit",
         createdBy: new mongoose.Types.ObjectId(userId),
         status: "posted",
       },

@@ -19,7 +19,7 @@ const JournalEntrySchema = new mongoose.Schema(
     lines: { type: [JournalEntryLineSchema], required: true, validate: [(v: any[]) => v.length > 0, "At least one line is required"] },
     totalDebit: { type: Number, required: true, default: 0 },
     totalCredit: { type: Number, required: true, default: 0 },
-    source: { type: String, enum: ["POS", "EXPENSE", "PURCHASE", "RETURN", "MANUAL"], default: "MANUAL" },
+    source: { type: String, enum: ["POS", "EXPENSE", "PURCHASE", "RETURN", "PAYMENT", "CLOSING", "MANUAL"], default: "MANUAL" },
     sourceId: { type: mongoose.Schema.Types.ObjectId, default: null },
     postedBy: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
     status: { type: String, enum: ["draft", "posted"], default: "posted" },

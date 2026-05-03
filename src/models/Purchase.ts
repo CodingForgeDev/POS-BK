@@ -36,14 +36,37 @@ const PurchaseSchema = new mongoose.Schema(
       },
     },
     totalAmount: { type: Number, required: true, min: 0 },
+    paidAmount: { type: Number, default: 0, min: 0 },
     notes: { type: String, default: "" },
+    paymentMethod: { type: String, enum: ["cash", "credit"], default: "credit" },
+    paymentStatus: {
+      type: String,
+      enum: ["unpaid", "partial", "paid"],
+      default: "unpaid",
+    },
     createdBy: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true },
     status: { type: String, enum: ["posted", "voided"], default: "posted" },
   },
   { timestamps: true }
 );
 
+// Auto-update paymentStatus based on paidAmount
+PurchaseSchema.pre("save", function (next) {
+  if (this.paymentMethod === "cash") {
+    this.paidAmount = this.totalAmount;
+    this.paymentStatus = "paid";
+  } else if (this.paidAmount >= this.totalAmount) {
+    this.paymentStatus = "paid";
+  } else if (this.paidAmount > 0) {
+    this.paymentStatus = "partial";
+  } else {
+    this.paymentStatus = "unpaid";
+  }
+  next();
+});
+
 PurchaseSchema.index({ supplier: 1, receivedAt: -1 });
 PurchaseSchema.index({ receivedAt: -1 });
+PurchaseSchema.index({ paymentStatus: 1 });
 
 export default (mongoose.models.Purchase || mongoose.model("Purchase", PurchaseSchema)) as mongoose.Model<any>;

@@ -8,7 +8,10 @@ import StockLayer from "../models/StockLayer";
 import Inventory from "../models/Inventory";
 import Supplier from "../models/Supplier";
 import { postPurchaseInSession, type PostPurchaseLineInput } from "../lib/purchasePosting";
-import { createJournalEntryRecord, findLedgerAccount } from "../lib/journalPosting";
+import {
+  createJournalEntryRecord,
+  resolvePurchasePostingAccounts,
+} from "../lib/journalPosting";
 
 const router: Router = Router();
 
@@ -16,17 +19,22 @@ async function postPurchaseJournalEntry(purchase: any) {
   const amount = Number(purchase.totalAmount || 0);
   if (!amount || !purchase._id) return;
 
-  const inventoryAccount =
-    (await findLedgerAccount({ title: /inventory/i })) ||
-    (await findLedgerAccount({ type: "asset" }));
-  const payableAccount =
-    (await findLedgerAccount({ type: "liability" })) ||
-    (await findLedgerAccount({ type: { $in: ["bank", "asset"] } }));
+  const { inventoryAccount, paymentAccount } = await resolvePurchasePostingAccounts(
+    String(purchase.supplier?._id || purchase.supplier || ""),
+    {
+      paymentMethod: String(purchase.paymentMethod || "credit").toLowerCase(),
+    }
+  );
 
-  if (!inventoryAccount || !payableAccount) {
-    console.warn("Skipped purchase journal entry: missing inventory or payable account mapping");
+  if (!inventoryAccount || !paymentAccount) {
+    console.warn("Skipped purchase journal entry: missing inventory or payment account mapping");
     return;
   }
+
+  // Get supplier name for professional description
+  const supplierName = purchase.supplier?.name || "Unknown Supplier";
+  const reference = purchase.referenceNumber || purchase._id?.toString() || "";
+  const description = `Purchase from ${supplierName}`;
 
   const lines = [
     {
@@ -34,22 +42,22 @@ async function postPurchaseJournalEntry(purchase: any) {
       accountName: inventoryAccount.title,
       debit: amount,
       credit: 0,
-      note: `Purchase ${purchase.referenceNumber || purchase._id}`,
+      note: `Purchase from ${supplierName}`,
     },
     {
-      account: payableAccount._id,
-      accountName: payableAccount.title,
+      account: paymentAccount._id,
+      accountName: paymentAccount.title,
       debit: 0,
       credit: amount,
-      note: `Purchase ${purchase.referenceNumber || purchase._id}`,
+      note: `Purchase from ${supplierName}`,
     },
   ];
 
   try {
     await createJournalEntryRecord({
       date: purchase.receivedAt || new Date(),
-      reference: purchase.referenceNumber || purchase._id?.toString() || "",
-      description: `Purchase ${purchase.referenceNumber || purchase._id}`,
+      reference,
+      description,
       lines,
       source: "PURCHASE",
       sourceId: purchase._id,
@@ -64,10 +72,20 @@ async function postPurchaseJournalEntry(purchase: any) {
 router.get("/", authenticate, async (req: AuthenticatedRequest, res: Response) => {
   try {
     await connectDB();
-    const { supplier, from, to, page = "1", limit = "20" } = req.query as Record<string, string>;
+    const { supplier, supplierId, paymentStatus, from, to, page = "1", limit = "20" } = req.query as Record<string, string>;
 
     const query: Record<string, unknown> = { status: "posted" };
-    if (supplier) query.supplier = supplier;
+    
+    // Support both 'supplier' and 'supplierId' query params
+    if (supplier || supplierId) {
+      query.supplier = supplier || supplierId;
+    }
+    
+    // Filter by payment status (unpaid, partial, paid)
+    if (paymentStatus) {
+      query.paymentStatus = paymentStatus;
+    }
+    
     if (from || to) {
       const range: Record<string, Date> = {};
       if (from) range.$gte = new Date(from);
@@ -91,9 +109,16 @@ router.get("/", authenticate, async (req: AuthenticatedRequest, res: Response) =
       .populate("supplier", "name phone")
       .populate("createdBy", "name")
       .populate("lines.inventoryItem", "name unit sku")
+      .select("+paidAmount +paymentStatus")
       .lean();
+    
+    // Add calculated remainingAmount field
+    const purchasesWithRemaining = purchases.map((p: any) => ({
+      ...p,
+      remainingAmount: p.totalAmount - (p.paidAmount || 0),
+    }));
 
-    return sendSuccess(res, { purchases, total, page: pageNum, limit: limitNum });
+    return sendSuccess(res, { purchases: purchasesWithRemaining, total, page: pageNum, limit: limitNum });
   } catch (error) {
     console.error("List purchases error:", error);
     return sendError(res, "Failed to fetch purchases", 500);
@@ -123,12 +148,13 @@ router.post("/", authenticate, async (req: AuthenticatedRequest, res: Response) 
       return sendError(res, "Unauthorized", 403);
     }
 
-    const { supplierId, referenceNumber, receivedAt, notes, lines } = req.body as {
+    const { supplierId, referenceNumber, receivedAt, notes, lines, paymentMethod } = req.body as {
       supplierId?: string | null;
       referenceNumber?: string;
       receivedAt?: string;
       notes?: string;
       lines?: PostPurchaseLineInput[];
+      paymentMethod?: string;
     };
 
     if (!lines || !Array.isArray(lines) || lines.length === 0) {
@@ -138,6 +164,11 @@ router.post("/", authenticate, async (req: AuthenticatedRequest, res: Response) 
     const received = receivedAt ? new Date(receivedAt) : new Date();
     if (Number.isNaN(received.getTime())) {
       return sendError(res, "Invalid receivedAt", 400);
+    }
+
+    const normalizedPaymentMethod = String(paymentMethod || "credit").toLowerCase();
+    if (!["cash", "credit"].includes(normalizedPaymentMethod)) {
+      return sendError(res, "Invalid paymentMethod", 400);
     }
 
     const session = await mongoose.startSession();
@@ -150,6 +181,7 @@ router.post("/", authenticate, async (req: AuthenticatedRequest, res: Response) 
           receivedAt: received,
           notes: notes ?? "",
           lines,
+          paymentMethod: normalizedPaymentMethod,
           userId: req.user.id,
         });
         purchasePayload = purchase;
@@ -218,12 +250,13 @@ router.patch("/:id", authenticate, async (req: AuthenticatedRequest, res: Respon
       return sendError(res, "Unauthorized", 403);
     }
 
-    const { supplierId, referenceNumber, receivedAt, notes, lines } = req.body as {
+    const { supplierId, referenceNumber, receivedAt, notes, lines, paymentMethod } = req.body as {
       supplierId?: string | null;
       referenceNumber?: string;
       receivedAt?: string;
       notes?: string;
       lines?: PostPurchaseLineInput[];
+      paymentMethod?: string;
     };
 
     const purchaseDoc = (await Purchase.findById(req.params.id).lean()) as any;
@@ -263,6 +296,14 @@ router.patch("/:id", authenticate, async (req: AuthenticatedRequest, res: Respon
 
     if (notes !== undefined) {
       updateBody.notes = String(notes);
+    }
+
+    if (paymentMethod !== undefined) {
+      const normalizedPaymentMethod = String(paymentMethod || "credit").toLowerCase();
+      if (!["cash", "credit"].includes(normalizedPaymentMethod)) {
+        return sendError(res, "Invalid paymentMethod", 400);
+      }
+      updateBody.paymentMethod = normalizedPaymentMethod;
     }
 
     let normalizedLines: PostPurchaseLineInput[] | null = null;

@@ -4,6 +4,7 @@ import { verifyToken } from "../lib/jwt";
 export interface AuthenticatedRequest extends Request {
   user: {
     id: string;
+    _id: string;
     role: string;
     name: string;
     email: string;
@@ -38,6 +39,7 @@ export function authenticate(
 
   (req as AuthenticatedRequest).user = {
     id: decoded.id,
+    _id: decoded.id,
     role: decoded.role,
     name: decoded.name,
     email: decoded.email,

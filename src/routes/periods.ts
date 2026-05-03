@@ -292,6 +292,8 @@ router.post("/:id/close", authenticate, async (req: AuthenticatedRequest, res: R
     }
     
     // Create the closing journal entry
+    const currentUserId = new mongoose.Types.ObjectId(req.user._id);
+
     const closingEntry = await createJournalEntryRecord({
       date: period.endDate,
       reference: `CLOSE-${period.name.replace(/\s/g, "-")}`,
@@ -299,14 +301,14 @@ router.post("/:id/close", authenticate, async (req: AuthenticatedRequest, res: R
       lines: closingLines,
       source: "CLOSING",
       sourceId: period._id,
-      postedBy: req.user._id,
+      postedBy: currentUserId,
     });
-    
+
     // Update period
     period.status = "closed";
     period.netProfit = netProfit;
     period.closingJournalEntryId = closingEntry._id as any;
-    period.closedBy = req.user._id;
+    period.closedBy = currentUserId;
     period.closedAt = new Date();
     await period.save();
     

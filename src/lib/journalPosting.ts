@@ -356,7 +356,7 @@ export async function createReturnJournalEntry(returnRecord: any, session: Clien
   });
 }
 
-export async function createJournalEntryRecord(payload: Record<string, unknown>) {
+export async function createJournalEntryRecord(payload: Record<string, unknown>): Promise<any> {
   const {
     date,
     reference,
@@ -437,7 +437,7 @@ export async function createJournalEntryRecord(payload: Record<string, unknown>)
   }));
 
   const entryDate = date instanceof Date ? date : new Date(String(date));
-  const entry = await JournalEntry.create(
+  const entry = (await JournalEntry.create(
     {
       date: entryDate,
       reference: String(reference || "").trim(),
@@ -451,7 +451,7 @@ export async function createJournalEntryRecord(payload: Record<string, unknown>)
       status,
     },
     session ? { session } : undefined
-  );
+  )) as any;
 
   return entry;
 }

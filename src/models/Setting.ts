@@ -9,5 +9,5 @@ const SettingSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
-const Setting = mongoose.models.Setting || mongoose.model("Setting", SettingSchema);
+const Setting = (mongoose.models.Setting || mongoose.model("Setting", SettingSchema)) as mongoose.Model<any>;
 export default Setting;

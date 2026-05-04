@@ -15,6 +15,8 @@ const LedgerAccountSchema = new mongoose.Schema(
     supplierName: { type: String, default: "", trim: true },
     paymentTerms: { type: String, default: "", trim: true },
     isReconcilable: { type: Boolean, default: false },
+    /** Link account to a specific employee (for employee personal accounts, salaries, etc.) */
+    linkedEmployee: { type: mongoose.Schema.Types.ObjectId, ref: "Employee", default: null },
     metadata: { type: mongoose.Schema.Types.Mixed, default: {} },
     address: { type: String, default: "" },
     contact: { type: String, default: "" },

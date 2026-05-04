@@ -82,27 +82,41 @@ function buildLooseRegexFromCategory(category: string): RegExp | null {
   return new RegExp(tokens.join("|"), "i");
 }
 
+function normalizePaymentAccounts(value: unknown): any[] {
+  if (Array.isArray(value)) return value;
+  if (typeof value === "string") {
+    try {
+      return JSON.parse(value);
+    } catch {
+      return [];
+    }
+  }
+  return [];
+}
+
 export async function resolveExpenseDebitAccount(
   category: string
 ): Promise<any | null> {
-  const categoryRegex = buildLooseRegexFromCategory(category);
-  const isEmployeeExpense = /employee|salary|wage|payroll|staff/i.test(
-    category || ""
-  );
+  const categoryString = String(category || "").trim();
+  const categoryRegex = buildLooseRegexFromCategory(categoryString);
   const lookups: Array<Record<string, unknown>> = [];
 
-  if (isEmployeeExpense) {
-    lookups.push(
-      { type: "expense", title: /employee|salary|wage|payroll|staff/i },
-      { type: "expense", subcategory: "operating", title: /employee|salary|wage|payroll|staff/i }
-    );
+  if (categoryString) {
+    lookups.push({ type: "expense", subcategory: categoryString });
   }
   if (categoryRegex) {
     lookups.push(
       { type: "expense", title: categoryRegex },
-      { type: "expense", "metadata.category": String(category || "").trim() }
+      { type: "expense", "metadata.category": categoryString }
     );
   }
+
+  const isEmployeeExpense = /employee|salary|wage|payroll|staff/i.test(categoryString);
+  if (isEmployeeExpense) {
+    lookups.unshift({ type: "expense", subcategory: "payroll" });
+    lookups.unshift({ type: "expense", title: /employee|salary|wage|payroll|staff/i });
+  }
+
   lookups.push({ type: "expense", subcategory: "operating" }, { type: "expense" });
 
   return resolveFirstLedgerAccount(lookups);
@@ -112,17 +126,30 @@ export async function resolveExpensePaymentAccount(
   paymentMethod: string
 ): Promise<any | null> {
   const method = String(paymentMethod || "").toLowerCase();
-  
+  const paymentAccounts = normalizePaymentAccounts(await getSettingValue<any[]>("paymentAccounts"));
+
+  if (Array.isArray(paymentAccounts) && paymentAccounts.length > 0) {
+    const matchedAccount = paymentAccounts.find(
+      (account: any) => String(account.method || "").toLowerCase() === method && account.ledgerAccountId && mongoose.Types.ObjectId.isValid(account.ledgerAccountId)
+    );
+    if (matchedAccount) {
+      const account = await LedgerAccount.findOne({
+        _id: new mongoose.Types.ObjectId(String(matchedAccount.ledgerAccountId)),
+        isActive: true,
+      }).lean();
+      if (account) return account;
+    }
+  }
+
   // Priority 1: Check Settings for default cash/bank account
   if (method === "bank_transfer" || method === "card") {
     const settingAccount = await resolveLedgerAccountFromSetting("defaultBankAccountId");
     if (settingAccount) return settingAccount;
   } else {
-    // For cash payments, try cash account setting first
     const settingAccount = await resolveLedgerAccountFromSetting("defaultCashAccountId");
     if (settingAccount) return settingAccount;
   }
-  
+
   // Priority 2: Fallback to type/title matching
   if (method === "bank_transfer") {
     return resolveFirstLedgerAccount([
@@ -452,6 +479,38 @@ export async function createJournalEntryRecord(payload: Record<string, unknown>)
     },
     session ? { session } : undefined
   )) as any;
+
+  // Update ledger account running balances so Chart of Accounts reflects journal-posted changes.
+  const accountBalanceChanges = new Map<string, { accountId: any; debit: number; credit: number }>();
+  for (const line of preparedLines) {
+    const accountId = String(line.account);
+    const existing = accountBalanceChanges.get(accountId);
+    if (existing) {
+      existing.debit += Number(line.debit || 0);
+      existing.credit += Number(line.credit || 0);
+    } else {
+      accountBalanceChanges.set(accountId, {
+        accountId: line.account,
+        debit: Number(line.debit || 0),
+        credit: Number(line.credit || 0),
+      });
+    }
+  }
+
+  for (const { accountId, debit, credit } of accountBalanceChanges.values()) {
+    const account = await LedgerAccount.findById(accountId).session(session || undefined).lean();
+    if (!account) continue;
+    const normalDebit = ["asset", "bank", "receivable", "expense"].includes(account.type);
+    const delta = normalDebit ? debit - credit : credit - debit;
+    if (delta !== 0) {
+      const updateQuery = LedgerAccount.updateOne(
+        { _id: accountId },
+        { $inc: { currentBalance: delta } }
+      );
+      if (session) updateQuery.session(session);
+      await updateQuery;
+    }
+  }
 
   return entry;
 }

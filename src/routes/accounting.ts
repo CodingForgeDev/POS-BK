@@ -4,6 +4,7 @@ import { connectDB } from "../lib/mongodb";
 import { authenticate, AuthenticatedRequest } from "../middleware/auth";
 import { sendSuccess, sendError } from "../lib/utils";
 import LedgerAccount from "../models/LedgerAccount";
+import Employee from "../models/Employee";
 import JournalEntry from "../models/JournalEntry";
 import ReturnTransaction from "../models/ReturnTransaction";
 import Purchase from "../models/Purchase";
@@ -91,10 +92,27 @@ async function assertSingleInventoryAccount(
 router.get("/accounts", authenticate, async (req: AuthenticatedRequest, res: Response) => {
   try {
     await connectDB();
-    const { type, subcategory, search } = req.query as Record<string, string>;
+    const { type, subcategory, search, linkedEmployee } = req.query as Record<string, string>;
     const query: any = { isActive: true };
-    if (type) query.type = String(type).trim();
-    if (subcategory) query.subcategory = String(subcategory).trim();
+    if (type) {
+      const typeValue = String(type).trim();
+      if (typeValue === "asset") {
+        query.type = { $in: ["asset", "bank", "receivable"] };
+      } else {
+        query.type = typeValue;
+      }
+    }
+    if (subcategory) {
+      const subcategoryValue = String(subcategory).trim();
+      const normalizedSubcategoryMap: Record<string, string[]> = {
+        cash: ["cash", "bank"],
+        receivable: ["receivable", "accounts-receivable"],
+        payable: ["payable", "accounts-payable"],
+        fixed: ["fixed", "fixed-assets"],
+        tax_payable: ["tax_payable", "tax-payable"],
+      };
+      query.subcategory = { $in: normalizedSubcategoryMap[subcategoryValue] || [subcategoryValue] };
+    }
     if (search) {
       const text = String(search).trim();
       query.$or = [
@@ -102,7 +120,16 @@ router.get("/accounts", authenticate, async (req: AuthenticatedRequest, res: Res
         { title: { $regex: text, $options: "i" } },
       ];
     }
-    const accounts = await LedgerAccount.find(query).sort({ code: 1 }).lean();
+    if (linkedEmployee) {
+      const employeeId = String(linkedEmployee).trim();
+      if (mongoose.Types.ObjectId.isValid(employeeId)) {
+        query.linkedEmployee = new mongoose.Types.ObjectId(employeeId);
+      }
+    }
+    const accounts = await LedgerAccount.find(query)
+      .populate("linkedEmployee", "name position department")
+      .sort({ code: 1 })
+      .lean();
     return sendSuccess(res, accounts);
   } catch (error) {
     console.error("Accounting accounts error:", error);
@@ -280,10 +307,26 @@ router.post("/accounts", authenticate, async (req: AuthenticatedRequest, res: Re
       address,
       contact,
       openingBalance,
+      employeeId,
+      linkedEmployeeId,
     } = req.body as Record<string, unknown>;
     if (!code || !title || !type) {
       return sendError(res, "Code, title, and account type are required", 400);
     }
+    
+    // Validate employee if provided
+    const linkedEmpId = linkedEmployeeId || employeeId;
+    let linkedEmployee = null;
+    if (linkedEmpId) {
+      const empIdStr = String(linkedEmpId).trim();
+      if (mongoose.Types.ObjectId.isValid(empIdStr)) {
+        linkedEmployee = await Employee.findById(empIdStr);
+        if (!linkedEmployee) {
+          return sendError(res, "Selected employee not found", 404);
+        }
+      }
+    }
+    
     const normalizedMetadata = sanitizeMetadata(metadata);
     const accountType = String(type).trim();
     const accountSubcategory = String(subcategory || "").trim();
@@ -311,6 +354,7 @@ router.post("/accounts", authenticate, async (req: AuthenticatedRequest, res: Re
       contact: String(contact || "").trim(),
       openingBalance: Number(openingBalance || 0),
       currentBalance: Number(openingBalance || 0),
+      linkedEmployee: linkedEmployee ? linkedEmployee._id : null,
     });
     return sendSuccess(res, account, "Account created", 201);
   } catch (error) {
@@ -337,6 +381,8 @@ router.patch("/accounts/:id", authenticate, async (req: AuthenticatedRequest, re
       address,
       contact,
       openingBalance,
+      employeeId,
+      linkedEmployeeId,
     } = req.body as Record<string, unknown>;
     if (!code || !title || !type) {
       return sendError(res, "Code, title, and account type are required", 400);
@@ -345,6 +391,19 @@ router.patch("/accounts/:id", authenticate, async (req: AuthenticatedRequest, re
     const account = await LedgerAccount.findById(String(id));
     if (!account) {
       return sendError(res, "Account not found", 404);
+    }
+    
+    // Validate employee if provided
+    const linkedEmpId = linkedEmployeeId || employeeId;
+    let linkedEmployee = null;
+    if (linkedEmpId) {
+      const empIdStr = String(linkedEmpId).trim();
+      if (mongoose.Types.ObjectId.isValid(empIdStr)) {
+        linkedEmployee = await Employee.findById(empIdStr);
+        if (!linkedEmployee) {
+          return sendError(res, "Selected employee not found", 404);
+        }
+      }
     }
 
     const normalizedMetadata = sanitizeMetadata(metadata);
@@ -372,6 +431,7 @@ router.patch("/accounts/:id", authenticate, async (req: AuthenticatedRequest, re
     account.metadata = normalizedMetadata;
     account.address = String(address || "").trim();
     account.contact = String(contact || "").trim();
+    account.linkedEmployee = linkedEmployee ? linkedEmployee._id : null;
 
     const newOpeningBalance = Number(openingBalance || 0);
     if (!Number.isNaN(newOpeningBalance)) {

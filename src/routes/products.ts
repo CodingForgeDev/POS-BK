@@ -5,6 +5,7 @@ import { sendSuccess, sendError } from "../lib/utils";
 import { pickProductPayload } from "../lib/productPayload";
 import Product from "../models/Product";
 import { calculateRecipeCostPriceForRecipe } from "../lib/recipeInventory";
+import { calculateProductsAvailability } from "../lib/stockAvailability";
 
 const router: Router = Router();
 
@@ -21,12 +22,25 @@ router.get("/", authenticate, async (req: AuthenticatedRequest, res: Response) =
       .populate("category", "name color")
       .populate(
         "recipeLines.inventoryItem",
-        "name unit currentStock minimumStock costPerUnit"
+        "name unit currentStock minimumStock costPerUnit reservedStock"
       )
       .sort({ sortOrder: 1, name: 1 })
       .lean();
 
-    return sendSuccess(res, products);
+    // Calculate stock availability for all products
+    const availabilityMap = await calculateProductsAvailability(products);
+
+    // Enrich products with availability data
+    const enrichedProducts = products.map((product: any) => {
+      const availability = availabilityMap.get(String(product._id));
+      return {
+        ...product,
+        availableQuantity: availability?.availableQuantity ?? Infinity,
+        stockStatus: availability?.stockStatus ?? "available",
+      };
+    });
+
+    return sendSuccess(res, enrichedProducts);
   } catch (error) {
     return sendError(res, "Failed to fetch products", 500);
   }
@@ -57,6 +71,42 @@ router.post("/", authenticate, async (req: AuthenticatedRequest, res: Response) 
     return sendSuccess(res, product, "Product created successfully", 201);
   } catch (error) {
     return sendError(res, "Failed to create product", 500);
+  }
+});
+
+router.get("/stock-status", authenticate, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    await connectDB();
+    const { productIds } = req.query as Record<string, string>;
+
+    if (!productIds) {
+      return sendError(res, "productIds query parameter is required", 400);
+    }
+
+    const ids = productIds.split(",").map((id) => id.trim()).filter(Boolean);
+    if (ids.length === 0) {
+      return sendSuccess(res, []);
+    }
+
+    const products = await Product.find({ _id: { $in: ids }, isActive: true })
+      .select("_id isReadyItem recipeLines")
+      .populate("recipeLines.inventoryItem", "currentStock reservedStock unit")
+      .lean();
+
+    const availabilityMap = await calculateProductsAvailability(products);
+
+    const result = products.map((product: any) => {
+      const availability = availabilityMap.get(String(product._id));
+      return {
+        productId: String(product._id),
+        availableQuantity: availability?.availableQuantity ?? Infinity,
+        stockStatus: availability?.stockStatus ?? "available",
+      };
+    });
+
+    return sendSuccess(res, result);
+  } catch (error) {
+    return sendError(res, "Failed to fetch stock status", 500);
   }
 });
 

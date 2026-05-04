@@ -498,7 +498,7 @@ export async function createJournalEntryRecord(payload: Record<string, unknown>)
   }
 
   for (const { accountId, debit, credit } of accountBalanceChanges.values()) {
-    const account = await LedgerAccount.findById(accountId).session(session || undefined).lean();
+    const account = await LedgerAccount.findById(accountId).session(session || undefined).lean() as unknown as { type: string } | null;
     if (!account) continue;
     const normalDebit = ["asset", "bank", "receivable", "expense"].includes(account.type);
     const delta = normalDebit ? debit - credit : credit - debit;

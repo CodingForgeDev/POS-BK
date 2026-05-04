@@ -159,7 +159,7 @@ export async function buildInventoryStockMap(
  * Returns a map of productId -> {availableQuantity, stockStatus}
  */
 export async function calculateProductsAvailability(
-  products: ProductWithRecipe[],
+  products: Array<ProductWithRecipe | any>,
   session?: ClientSession | null
 ): Promise<Map<string, { availableQuantity: number; stockStatus: string }>> {
   // Collect all unique inventory item IDs from all products

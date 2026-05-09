@@ -13,7 +13,7 @@ import {
   duplicateRecipe,
 } from "../controllers/bomTransaction.controller";
 
-const router = Router();
+const router: Router = Router();
 
 router.get("/", authenticate, getAllBOMs);
 router.get("/:id", authenticate, getBOMById);

@@ -365,7 +365,7 @@ router.post("/", authenticate, async (req: AuthenticatedRequest, res: Response) 
     const populatedOrder = await Order.findById(order._id)
       .populate("customer", "name phone")
       .populate("createdBy", "name")
-      .lean();
+      .lean() as any;
     if (populatedOrder) {
       emitOrderCreated({ ...populatedOrder, status: normalizeOrderStatus(populatedOrder.status) });
     }

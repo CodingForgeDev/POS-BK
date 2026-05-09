@@ -285,8 +285,8 @@ router.get("/manufacturing", authenticate, async (req: AuthenticatedRequest, res
     }
 
     // Fetch BOM transactions
-    const query: any = BOMTransaction.find(filter);
-    const boms = await query
+    const rawBOMTransactionModel: any = BOMTransaction;
+    const boms = await rawBOMTransactionModel.find(filter)
       .populate("createdBy", "name email")
       .lean();
 

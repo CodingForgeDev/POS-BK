@@ -5,29 +5,38 @@ import { sendSuccess, sendError } from "../lib/utils";
 import Supplier from "../models/Supplier";
 import LedgerAccount from "../models/LedgerAccount";
 import mongoose from "mongoose";
+import { getCoaBaseCode, extractSubDetailCode, getNextCoaAccountCode } from "../lib/coaConstants";
 
 const router: Router = Router();
 
 /**
- * Get next available GL code in the 2000-2999 range for supplier A/P accounts
+ * Get next available GL code using COA hierarchy for supplier A/P accounts
+ * Uses subcategory "payable" which maps to: 2-04-010-0000-XXXXX
  */
 async function getNextSupplierAccountCode(): Promise<string> {
-  const start = 2100;
-  const end = 2999;
+  const subcategory = "payable";
+  const baseCode = getCoaBaseCode(subcategory);
   
-  const existingAccounts = await LedgerAccount.find({
-    code: { $gte: String(start), $lte: String(end) },
-  }).sort({ code: 1 }).lean();
-  
-  const usedCodes = new Set(existingAccounts.map(a => parseInt(a.code)));
-  
-  for (let code = start; code <= end; code++) {
-    if (!usedCodes.has(code)) {
-      return String(code);
-    }
+  if (!baseCode) {
+    throw new Error(`Unknown subcategory: ${subcategory}`);
   }
-  
-  throw new Error("No available GL codes in range 2100-2999 for supplier accounts");
+
+  // Query all existing accounts with the same base code
+  const escapedBaseCode = baseCode.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const accounts = await LedgerAccount.find({
+    code: { $regex: `^${escapedBaseCode}-` },
+    isActive: true,
+  })
+    .select("code")
+    .lean();
+
+  // Extract sub-detail codes (5th segment) from existing accounts
+  const usedSubDetailCodes = accounts
+    .map((acc: any) => extractSubDetailCode(acc.code))
+    .filter((code: number | null): code is number => code !== null);
+
+  // Generate next available COA code
+  return getNextCoaAccountCode(subcategory, usedSubDetailCodes);
 }
 
 /**
@@ -63,7 +72,7 @@ async function upsertSupplierLedgerAccount(
     code,
     title: `A/P - ${supplierName}`,
     type: "liability",
-    subcategory: "accounts-payable",
+    subcategory: "payable",
     currency: "PKR",
     supplierId,
     supplierName,

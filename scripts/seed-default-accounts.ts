@@ -392,7 +392,7 @@ const DEFAULT_SETTINGS = [
   { key: "defaultCashAccountId", value: null, description: "Default cash account for POS transactions" },
   { key: "defaultBankAccountId", value: null, description: "Default bank account for payments" },
   { key: "defaultInventoryAccountId", value: null, description: "Default inventory asset account" },
-  { key: "defaultSalesAccountId", value: null, description: "Default sales revenue account" },
+  { key: "defaultSalesAccountId", value: null, description: "Default sales/revenue account" },
   { key: "defaultCogsAccountId", value: null, description: "Default cost of goods sold account" },
   { key: "defaultTaxPayableAccountId", value: null, description: "Default GST/sales tax payable account" },
   { key: "defaultServiceChargeAccountId", value: null, description: "Default service charge revenue account" },
@@ -450,7 +450,7 @@ async function seedDefaultAccounts() {
       {
         key: "defaultSalesAccountId",
         value: accountMap["sales-revenue"]?._id?.toString() || null,
-        description: "Default sales revenue account",
+        description: "Default sales/revenue account",
       },
       {
         key: "defaultCogsAccountId",

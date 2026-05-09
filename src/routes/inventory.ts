@@ -9,6 +9,8 @@ import { postAdjustmentLayerInSession } from "../lib/purchasePosting";
 import { deductInventoryFifo } from "../lib/inventoryFifo";
 import { recalculateProductCostPriceForInventoryItem } from "../lib/recipeInventory";
 import { InsufficientStockError } from "../lib/inventoryErrors";
+import { createJournalEntryRecord, resolvePurchasePostingAccounts } from "../lib/journalPosting";
+import Supplier from "../models/Supplier";
 
 async function generateUniqueInventorySku(): Promise<string> {
   const now = new Date();
@@ -29,12 +31,13 @@ const router: Router = Router();
 router.get("/", authenticate, async (req: AuthenticatedRequest, res: Response) => {
   try {
     await connectDB();
-    const { lowStock, search, unit, createdBy, from, to } = req.query as Record<string, string>;
+    const { lowStock, search, unit, createdBy, from, to, inventoryType } = req.query as Record<string, string>;
 
     const query: any = { isActive: true };
     if (lowStock === "true") query.$expr = { $lte: ["$currentStock", "$minimumStock"] };
     if (lowStock === "false") query.$expr = { $gt: ["$currentStock", "$minimumStock"] };
     if (unit) query.unit = unit;
+    if (inventoryType) query.inventoryType = inventoryType;
     if (createdBy) {
       query.$or = [{ createdBy }, { lastRestockedBy: createdBy }];
     }
@@ -66,6 +69,48 @@ router.get("/", authenticate, async (req: AuthenticatedRequest, res: Response) =
     return sendSuccess(res, items);
   } catch (error) {
     return sendError(res, "Failed to fetch inventory", 500);
+  }
+});
+
+router.get("/adjustments", authenticate, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    await connectDB();
+    const { inventoryItemId } = req.query as Record<string, string>;
+    const query: any = { sourceType: "adjustment" };
+    if (inventoryItemId) query.inventoryItem = inventoryItemId;
+
+    const layers = await StockLayer.find(query)
+      .sort({ receivedAt: -1, _id: -1 })
+      .populate("inventoryItem", "name sku unit")
+      .populate("supplier", "name")
+      .populate("createdBy", "name")
+      .lean();
+
+    const rows = layers.map((layer) => ({
+      _id: String(layer._id),
+      inventoryItemId: String(layer.inventoryItem?._id ?? layer.inventoryItem),
+      inventoryItemName: String(layer.inventoryItem?.name ?? "Unknown item"),
+      supplierId: layer.supplier?._id ? String(layer.supplier._id) : undefined,
+      supplierName: layer.supplier?.name || undefined,
+      adjustmentType: layer.adjustmentType as "add" | "remove",
+      status: "approved" as const,
+      quantity: layer.quantityOriginal,
+      quantityWeight: undefined,
+      unit: layer.inventoryItem?.unit || "unit",
+      unitCost: layer.unitCost,
+      reason: undefined,
+      createdBy: layer.createdBy ? { _id: String(layer.createdBy._id), name: layer.createdBy.name } : undefined,
+      approvedBy: undefined,
+      rejectedBy: undefined,
+      approvedAt: null,
+      rejectedAt: null,
+      createdAt: layer.createdAt ? layer.createdAt.toISOString() : new Date().toISOString(),
+    }));
+
+    return sendSuccess(res, rows);
+  } catch (error) {
+    console.error("Fetch inventory adjustments error:", error);
+    return sendError(res, "Failed to fetch inventory adjustments", 500);
   }
 });
 
@@ -115,18 +160,69 @@ router.post("/", authenticate, async (req: AuthenticatedRequest, res: Response) 
     });
 
     if (Number(currentStock) > 0) {
-      await StockLayer.create({
+      const openingDate = new Date();
+      const openingLayer = await StockLayer.create({
         sourceType: "opening",
         purchase: null,
         lineIndex: 0,
         inventoryItem: item._id,
         supplier: supplier || null,
         createdBy: req.user.id,
-        receivedAt: new Date(),
+        receivedAt: openingDate,
         quantityOriginal: Number(currentStock),
         quantityRemaining: Number(currentStock),
         unitCost: Number(costPerUnit) || 0,
       });
+
+      // Create journal entry for opening balance if supplier is specified
+      // This posts the initial A/P liability
+      if (supplier) {
+        try {
+          const amount = Number(currentStock) * Number(costPerUnit);
+          if (amount > 0) {
+            const { inventoryAccount, paymentAccount } = await resolvePurchasePostingAccounts(
+              String(supplier),
+              { paymentMethod: "credit" }
+            );
+
+            if (inventoryAccount && paymentAccount) {
+              // Get supplier name for description
+              const supplierDoc = await Supplier.findById(supplier).lean() as any;
+              const supplierNameForEntry = supplierDoc?.name || "Unknown Supplier";
+
+              const lines = [
+                {
+                  account: inventoryAccount._id,
+                  accountName: inventoryAccount.title,
+                  debit: amount,
+                  credit: 0,
+                  note: `Opening balance from ${supplierNameForEntry}`,
+                },
+                {
+                  account: paymentAccount._id,
+                  accountName: paymentAccount.title,
+                  debit: 0,
+                  credit: amount,
+                  note: `Opening balance from ${supplierNameForEntry}`,
+                },
+              ];
+
+              await createJournalEntryRecord({
+                date: openingDate,
+                reference: `OB-${openingLayer._id.toString().substring(0, 8)}`,
+                description: `Opening balance: ${item.name} from ${supplierNameForEntry}`,
+                lines,
+                source: "MANUAL",
+                sourceId: null,
+                postedBy: req.user.id,
+              });
+            }
+          }
+        } catch (err: any) {
+          // Log but don't fail - opening balance is recorded even if journal entry fails
+          console.warn("Failed to create opening balance journal entry:", err.message);
+        }
+      }
     }
 
     return sendSuccess(res, item, "Inventory item created", 201);

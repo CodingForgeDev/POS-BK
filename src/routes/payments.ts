@@ -7,6 +7,7 @@ import Supplier from "../models/Supplier";
 import Customer from "../models/Customer";
 import LedgerAccount from "../models/LedgerAccount";
 import Purchase from "../models/Purchase";
+import StockLayer from "../models/StockLayer";
 import JournalEntry from "../models/JournalEntry";
 import { createJournalEntryRecord } from "../lib/journalPosting";
 import { resolveExpensePaymentAccount } from "../lib/journalPosting";
@@ -24,13 +25,18 @@ router.post("/supplier", authenticate, async (req: AuthenticatedRequest, res: Re
     await connectDB();
     
     const { supplierId, amount, paymentDate, paymentMethod, referenceNumber, notes, purchaseId } = req.body;
+    const amountValue = Number(amount);
+    const paymentDateValue = paymentDate ? new Date(paymentDate) : new Date();
     
     // Validation
     if (!supplierId || !mongoose.Types.ObjectId.isValid(supplierId)) {
       return sendError(res, "Valid supplier ID is required", 400);
     }
-    if (!amount || typeof amount !== "number" || amount <= 0) {
+    if (!Number.isFinite(amountValue) || amountValue <= 0) {
       return sendError(res, "Valid payment amount is required", 400);
+    }
+    if (Number.isNaN(paymentDateValue.getTime())) {
+      return sendError(res, "Valid payment date is required", 400);
     }
     
     // Verify supplier exists
@@ -69,8 +75,8 @@ router.post("/supplier", authenticate, async (req: AuthenticatedRequest, res: Re
     const payment = await Payment.create({
       type: "supplier",
       supplierId,
-      amount: Number(amount),
-      paymentDate: paymentDate ? new Date(paymentDate) : new Date(),
+      amount: amountValue,
+      paymentDate: paymentDateValue,
       paymentMethod: paymentMethod || "cash",
       referenceNumber: referenceNumber || "",
       notes: notes || "",
@@ -160,13 +166,18 @@ router.post("/customer", authenticate, async (req: AuthenticatedRequest, res: Re
     await connectDB();
     
     const { customerId, amount, paymentDate, paymentMethod, referenceNumber, notes, invoiceId } = req.body;
+    const amountValue = Number(amount);
+    const paymentDateValue = paymentDate ? new Date(paymentDate) : new Date();
     
     // Validation
     if (!customerId || !mongoose.Types.ObjectId.isValid(customerId)) {
       return sendError(res, "Valid customer ID is required", 400);
     }
-    if (!amount || typeof amount !== "number" || amount <= 0) {
+    if (!Number.isFinite(amountValue) || amountValue <= 0) {
       return sendError(res, "Valid payment amount is required", 400);
+    }
+    if (Number.isNaN(paymentDateValue.getTime())) {
+      return sendError(res, "Valid payment date is required", 400);
     }
     
     // Verify customer exists
@@ -205,8 +216,8 @@ router.post("/customer", authenticate, async (req: AuthenticatedRequest, res: Re
     const payment = await Payment.create({
       type: "customer",
       customerId,
-      amount: Number(amount),
-      paymentDate: paymentDate ? new Date(paymentDate) : new Date(),
+      amount: amountValue,
+      paymentDate: paymentDateValue,
       paymentMethod: paymentMethod || "cash",
       referenceNumber: referenceNumber || "",
       notes: notes || "",
@@ -437,7 +448,7 @@ router.get("/outstanding/:type/:entityId", authenticate, async (req: Authenticat
 
 /**
  * GET /api/payments/pending-purchases/:supplierId
- * Get list of unpaid and partially paid purchases for a supplier
+ * Get list of unpaid and partially paid purchases + opening balance for a supplier
  */
 router.get("/pending-purchases/:supplierId", authenticate, async (req: AuthenticatedRequest, res: Response) => {
   try {
@@ -448,7 +459,8 @@ router.get("/pending-purchases/:supplierId", authenticate, async (req: Authentic
     if (!mongoose.Types.ObjectId.isValid(supplierId)) {
       return sendError(res, "Invalid supplier ID", 400);
     }
-    
+
+    // Fetch unpaid/partial purchases
     const purchases = await Purchase.find({
       supplier: supplierId,
       status: "posted",
@@ -467,7 +479,33 @@ router.get("/pending-purchases/:supplierId", authenticate, async (req: Authentic
       paidAmount: p.paidAmount || 0,
       remainingAmount: p.totalAmount - (p.paidAmount || 0),
       paymentStatus: p.paymentStatus,
+      sourceType: "purchase",
     }));
+
+    // Calculate opening balance amount
+    // Opening balance = Total stock layers with sourceType "opening" × unitCost
+    const openingLayers = await StockLayer.find({
+      sourceType: "opening",
+      supplier: supplierId,
+    }).lean();
+
+    const openingAmount = openingLayers.reduce((sum, layer: any) => {
+      return sum + (Number(layer.quantityOriginal || 0) * Number(layer.unitCost || 0));
+    }, 0);
+
+    // Add opening balance as a pending item if amount > 0
+    if (openingAmount > 0) {
+      pendingPurchases.unshift({
+        _id: `opening-${supplierId}`,
+        referenceNumber: "OPENING BALANCE",
+        receivedAt: openingLayers[0]?.receivedAt || new Date(),
+        totalAmount: openingAmount,
+        paidAmount: 0,
+        remainingAmount: openingAmount,
+        paymentStatus: "unpaid",
+        sourceType: "opening",
+      });
+    }
     
     return sendSuccess(res, pendingPurchases);
   } catch (error) {

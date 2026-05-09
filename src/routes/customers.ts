@@ -5,29 +5,38 @@ import { sendSuccess, sendError } from "../lib/utils";
 import Customer from "../models/Customer";
 import LedgerAccount from "../models/LedgerAccount";
 import mongoose from "mongoose";
+import { getCoaBaseCode, extractSubDetailCode, getNextCoaAccountCode } from "../lib/coaConstants";
 
 const router: Router = Router();
 
 /**
- * Get next available GL code in the 1300-1399 range for customer A/R accounts
+ * Get next available GL code using COA hierarchy for customer A/R accounts
+ * Uses subcategory "receivable" which maps to: 1-02-020-0000-XXXXX
  */
 async function getNextCustomerAccountCode(): Promise<string> {
-  const start = 1300;
-  const end = 1399;
+  const subcategory = "receivable";
+  const baseCode = getCoaBaseCode(subcategory);
   
-  const existingAccounts = await LedgerAccount.find({
-    code: { $gte: String(start), $lte: String(end) },
-  }).sort({ code: 1 }).lean();
-  
-  const usedCodes = new Set(existingAccounts.map(a => parseInt(a.code)));
-  
-  for (let code = start; code <= end; code++) {
-    if (!usedCodes.has(code)) {
-      return String(code);
-    }
+  if (!baseCode) {
+    throw new Error(`Unknown subcategory: ${subcategory}`);
   }
-  
-  throw new Error("No available GL codes in range 1300-1399 for customer accounts");
+
+  // Query all existing accounts with the same base code
+  const escapedBaseCode = baseCode.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const accounts = await LedgerAccount.find({
+    code: { $regex: `^${escapedBaseCode}-` },
+    isActive: true,
+  })
+    .select("code")
+    .lean();
+
+  // Extract sub-detail codes (5th segment) from existing accounts
+  const usedSubDetailCodes = accounts
+    .map((acc: any) => extractSubDetailCode(acc.code))
+    .filter((code: number | null): code is number => code !== null);
+
+  // Generate next available COA code
+  return getNextCoaAccountCode(subcategory, usedSubDetailCodes);
 }
 
 /**
@@ -66,8 +75,8 @@ async function upsertCustomerLedgerAccount(
   const ledgerAccount = await LedgerAccount.create({
     code,
     title: `A/R - ${customerName}`,
-    type: "receivable",
-    subcategory: "accounts-receivable",
+    type: "asset",
+    subcategory: "receivable",
     currency: "PKR",
     address: address || "",
     contact: phone || "",

@@ -23,6 +23,7 @@ import billingRoutes from "./routes/billing";
 import reportsRoutes from "./routes/reports";
 import attendanceRoutes from "./routes/attendance";
 import accountingRoutes from "./routes/accounting";
+import bomRoutes from "./routes/bomTransaction.routes";
 import settingsRoutes from "./routes/settings";
 import rolesRoutes from "./routes/roles";
 import paymentsRoutes from "./routes/payments";
@@ -31,6 +32,7 @@ import auditLogsRoutes from "./routes/audit-logs";
 import zktecoIclockRoutes from "./routes/zkteco/iclock";
 import zkPullRoutes from "./routes/zkteco/zkPull";
 import { initZkPull } from "./integrations/zkteco/zkPullScheduler";
+import { initializeSocketServer } from "./services/socket.service";
 import LedgerAccount from "./models/LedgerAccount";
 import { exec } from "child_process";
 import { promisify } from "util";
@@ -85,6 +87,7 @@ app.use("/api/discounts", discountsRoutes);
 app.use("/api/billing", billingRoutes);
 app.use("/api/reports", reportsRoutes);
 app.use("/api/accounting", accountingRoutes);
+app.use("/api/bom", bomRoutes);
 app.use("/api/payments", paymentsRoutes);
 app.use("/api/periods", periodsRoutes);
 app.use("/api/audit-logs", auditLogsRoutes);
@@ -150,21 +153,33 @@ connectDB()
     const apiServer = http.createServer(app);
     const zktecoServer = http.createServer(app);
 
-    apiServer.listen(PORT, () => {
-      console.log(`Server running on http://localhost:${PORT}`);
-    });
+    // Initialize Socket.io for real-time updates
+    initializeSocketServer(apiServer, CLIENT_URLS);
 
-    zktecoServer.listen(ZKTECO_PORT, () => {
-      console.log(`ZKTeco receiver running on http://localhost:${ZKTECO_PORT}/iclock`);
-    });
+    function startServer(server: http.Server, port: number | string, description: string) {
+      server.on("error", (err: NodeJS.ErrnoException) => {
+        if (err && err.code === "EADDRINUSE") {
+          console.error(`Port ${port} already in use for ${description}.`);
+          console.error(
+            `Please stop the process using this port or set a different PORT / ZKTECO_PORT / ZKTECO_FALLBACK_PORT.`
+          );
+          process.exit(1);
+        }
+        console.error(`Error starting ${description} on port ${port}:`, err);
+        process.exit(1);
+      });
+
+      server.listen(port, () => {
+        console.log(`${description} running on http://localhost:${port}`);
+      });
+    }
+
+    startServer(apiServer, PORT, "Server");
+    startServer(zktecoServer, ZKTECO_PORT, "ZKTeco receiver");
 
     if (ZKTECO_FALLBACK_PORT && String(ZKTECO_FALLBACK_PORT) !== String(ZKTECO_PORT)) {
       const zktecoFallbackServer = http.createServer(app);
-      zktecoFallbackServer.listen(ZKTECO_FALLBACK_PORT, () => {
-        console.log(
-          `ZKTeco receiver fallback running on http://localhost:${ZKTECO_FALLBACK_PORT}/iclock`
-        );
-      });
+      startServer(zktecoFallbackServer, ZKTECO_FALLBACK_PORT, "ZKTeco receiver fallback");
     }
 
     initZkPull();

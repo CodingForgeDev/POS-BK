@@ -6,6 +6,7 @@ import Invoice from "../models/Invoice";
 import Order from "../models/Order";
 import Expense from "../models/Expense";
 import User from "../models/User";
+import BOMTransaction from "../models/bom-transaction.model";
 
 const router: Router = Router();
 
@@ -245,6 +246,98 @@ router.get("/staff-performance", authenticate, async (req: AuthenticatedRequest,
   } catch (error) {
     console.error("Staff performance error:", error);
     return sendError(res, "Failed to fetch staff performance", 500);
+  }
+});
+
+router.get("/manufacturing", authenticate, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    await connectDB();
+    const { from, to, status, station } = req.query as Record<string, string>;
+
+    // Parse date range
+    let startDate: Date;
+    let endDate: Date;
+
+    if (from) {
+      startDate = new Date(from);
+      startDate.setHours(0, 0, 0, 0);
+    } else {
+      startDate = new Date();
+      startDate.setMonth(startDate.getMonth() - 1);
+      startDate.setHours(0, 0, 0, 0);
+    }
+
+    if (to) {
+      endDate = new Date(to);
+      endDate.setHours(23, 59, 59, 999);
+    } else {
+      endDate = new Date();
+      endDate.setHours(23, 59, 59, 999);
+    }
+
+    // Build filter
+    const filter: any = {
+      date: { $gte: startDate, $lte: endDate },
+    };
+
+    if (status && status !== "all") {
+      filter.status = status;
+    }
+
+    // Fetch BOM transactions
+    const boms = await BOMTransaction.find(filter)
+      .populate("createdBy", "name email")
+      .lean();
+
+    // Format report rows
+    const reportRows = (boms as any[]).map((bom) => {
+      const profitMargin =
+        bom.totalProducedValue > 0
+          ? (((bom.totalProducedValue - bom.totalRawCost) / bom.totalProducedValue) * 100).toFixed(2)
+          : "0.00";
+
+      return {
+        _id: bom._id,
+        transactionNo: bom.transactionNo,
+        date: bom.date.toISOString().split("T")[0],
+        status: bom.status,
+        totalRawCost: bom.totalRawCost,
+        totalProducedQty: bom.totalProducedQty,
+        totalProducedValue: bom.totalProducedValue,
+        profitMargin: Number(profitMargin),
+        variance: bom.variance,
+        createdBy: (bom.createdBy as any)?._id || "",
+        createdByName: (bom.createdBy as any)?.name || "Unknown",
+        rawMaterialsCount: bom.rawMaterials?.length || 0,
+        producedItemsCount: (bom.producedItems?.length || 0) + (bom.producedMenuItems?.length || 0),
+        journalEntryId: bom.journalEntryId,
+      };
+    });
+
+    // Calculate summary
+    const summary = {
+      totalRawCost: reportRows.reduce((sum, r) => sum + r.totalRawCost, 0),
+      totalProducedQty: reportRows.reduce((sum, r) => sum + r.totalProducedQty, 0),
+      totalProducedValue: reportRows.reduce((sum, r) => sum + r.totalProducedValue, 0),
+      totalProfit: reportRows.reduce((sum, r) => sum + (r.totalProducedValue - r.totalRawCost), 0),
+      totalMargin: 0,
+      postedCount: reportRows.filter((r) => r.status === "posted").length,
+      reversedCount: reportRows.filter((r) => r.status === "reversed").length,
+      draftCount: reportRows.filter((r) => r.status === "draft").length,
+    };
+
+    summary.totalMargin =
+      summary.totalProducedValue > 0
+        ? (((summary.totalProfit) / summary.totalProducedValue) * 100)
+        : 0;
+
+    return sendSuccess(res, {
+      data: reportRows,
+      summary,
+    });
+  } catch (error) {
+    console.error("Manufacturing report error:", error);
+    return sendError(res, "Failed to fetch manufacturing report", 500);
   }
 });
 

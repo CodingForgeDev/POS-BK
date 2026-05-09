@@ -14,6 +14,10 @@ const InventorySchema = new mongoose.Schema(
     defaultPackSize: { type: Number, default: null },
     costPerUnit: { type: Number, default: 0 },
     wastageAmount: { type: Number, default: 0 },
+    /** "raw" = raw material, "ready" = finished goods/ready menu inventory */
+    inventoryType: { type: String, enum: ["raw", "ready"], default: "raw" },
+    // ← NEW: Flag for Ready Menu ingredient tracking
+    isForReadyMenu: { type: Boolean, default: false, index: true },
     supplier: { type: mongoose.Schema.Types.ObjectId, ref: "Supplier", default: null },
     supplierName: { type: String, default: "" },
     supplierContact: { type: String, default: "" },

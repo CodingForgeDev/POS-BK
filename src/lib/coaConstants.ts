@@ -1,11 +1,9 @@
 /**
  * Chart of Accounts (COA) Hierarchy Constants
+ * Backend version - mirrors frontend for code generation consistency
  * 
  * Maps account subcategories to their Level 3 COA base codes (3-segment format).
- * Full account codes follow 5-segment format: 1-02-070-0001-00000
- *   - Segments 1-3: Base code from this mapping (e.g., 1-02-070)
- *   - Segment 4: Detail code (0001-9999, incremented for each new account)
- *   - Segment 5: Sub-detail code (00000, for future expansion)
+ * Full account codes follow 5-segment format: 1-02-070-0000-00001
  */
 
 export const COA_SUBCATEGORY_MAP: Record<string, string> = {
@@ -17,42 +15,50 @@ export const COA_SUBCATEGORY_MAP: Record<string, string> = {
   inventory: "1-02-010",      // STOCK IN TRADE
   fixed: "1-01-010",          // PROPERTY, PLANT & EQUIPMENT
   "fixed-assets": "1-01-010", // Legacy alias
-  depreciation: "1-01-020",   // ACCUMULATED DEPRECIATION OWN ASSETS
-  "accumulated-depreciation": "1-01-020", // Legacy alias
+  other_current: "1-02-050",  // OTHER CURRENT ASSETS
 
   // LIABILITY ACCOUNTS
   payable: "2-04-010",        // CREDITORS, ACCRUED & OTHER LIABILITIES
   "accounts-payable": "2-04-010", // Legacy alias
   tax_payable: "2-05-010",    // PROVISION FOR TAXATION
   "tax-payable": "2-05-010",  // Legacy alias
+  st_loan: "2-04-020",        // SHORT-TERM LOANS
+  "short-term-loan": "2-04-020", // Alias
+  accrued: "2-04-030",        // ACCRUED EXPENSES & LIABILITIES
+  "accrued-expenses": "2-04-030", // Alias
+  other_current_liability: "2-04-040",  // OTHER CURRENT LIABILITIES
 
   // EQUITY ACCOUNTS
   equity: "2-01-010",         // ISSUED SUBSCRIBED AND PAID UP CAPITAL
   capital: "2-01-010",        // Alias
   reserves: "2-02-020",       // REVENUE RESERVE
+  retained: "2-02-010",       // RETAINED EARNINGS
+  drawings: "2-03-010",       // DRAWINGS / DIVIDENDS
+  other: "2-03-020",          // OTHER EQUITY
 
   // REVENUE ACCOUNTS
   sales: "3-01-010",          // PROJECT REVENUE / SALES REVENUE
   revenue: "3-01-010",        // Alias
-  "other-income": "3-02-010", // OTHER INCOME
+  other_income: "3-02-010",   // OTHER INCOME
+  service: "3-01-020",        // SERVICE REVENUE
 
   // EXPENSE ACCOUNTS
   cogs: "4-01-010",           // MATERIAL (Cost of Goods Sold)
   "direct-cost": "4-01-010",  // Alias
   payroll: "4-02-010",        // EMPLOYEE PAYROLL & BENEFIT EXPENSES
   "employee-payroll": "4-02-010", // Legacy alias
-  "operating-expense": "4-02-020", // GENERAL ADMIN EXPENSES
-  rent: "4-02-060",           // RENT, RATES & TAXES
+  occupancy: "4-02-060",      // OCCUPANCY (RENT, RATES & TAXES)
+  rent: "4-02-060",           // Alias for occupancy
   utilities: "4-02-070",      // UTILITY BILL
   maintenance: "4-02-050",    // REPAIR & MAINTENANCE
+  supplies: "4-02-030",       // OFFICE & OPERATIONAL SUPPLIES
+  food: "4-02-040",           // FOOD & PANTRY EXPENSES
+  marketing: "4-02-080",      // MARKETING & ADVERTISING
+  miscellaneous: "4-02-090",  // MISCELLANEOUS EXPENSES
+  depreciation: "4-03-010",   // DEPRECIATION EXPENSE
+  interest: "4-04-010",       // INTEREST EXPENSE
+  taxes: "4-04-020",          // TAX EXPENSES
 };
-
-/**
- * Validates if a subcategory has a valid COA base code
- */
-export function isValidCoaSubcategory(subcategory: string): boolean {
-  return subcategory in COA_SUBCATEGORY_MAP;
-}
 
 /**
  * Gets the COA base code for a subcategory

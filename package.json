@@ -20,6 +20,7 @@
     "seed:invoices": "tsx scripts/seed-invoices.js",
     "test:lifecycle": "tsx --test src/tests/orderLifecycle.test.ts",
     "backfill:stock-layers": "tsx scripts/backfill-stock-layers-from-inventory.ts",
+    "backfill:opening-balance": "tsx scripts/backfill-opening-balance-journal-entries.ts",
     "seed:suppliers-purchases": "tsx scripts/seed-suppliers-and-purchases.ts"
   },
   "dependencies": {
@@ -33,7 +34,9 @@
     "luxon": "^3.7.2",
     "mongoose": "^8.4.1",
     "morgan": "^1.10.0",
-    "node-zklib": "^1.3.0"
+    "node-zklib": "^1.3.0",
+    "socket.io": "^4.8.3",
+    "socket.io-client": "^4.8.3"
   },
   "devDependencies": {
     "@types/bcryptjs": "^2.4.6",

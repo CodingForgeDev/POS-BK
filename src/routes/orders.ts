@@ -12,6 +12,7 @@ import { getOrderServiceChargeConfig } from "../lib/serviceCharge";
 import { reserveInventoryForOrder, releaseReservationForOrder } from "../lib/inventoryReservations";
 import { InsufficientStockError } from "../lib/recipeInventory";
 import { canTransitionOrderStatus, normalizeOrderStatus, toLegacyStatus } from "../lib/orderLifecycle";
+import { emitOrderCreated, emitOrderUpdated, emitOrderStatusChanged } from "../services/socket.service";
 
 const router: Router = Router();
 
@@ -360,6 +361,15 @@ router.post("/", authenticate, async (req: AuthenticatedRequest, res: Response) 
       }
     }
 
+    // Emit socket event for real-time updates
+    const populatedOrder = await Order.findById(order._id)
+      .populate("customer", "name phone")
+      .populate("createdBy", "name")
+      .lean();
+    if (populatedOrder) {
+      emitOrderCreated({ ...populatedOrder, status: normalizeOrderStatus(populatedOrder.status) });
+    }
+
     return sendSuccess(res, order, "Order created successfully", 201);
   } catch (error) {
     console.error("Create order error:", error);
@@ -570,9 +580,18 @@ router.patch("/:id", authenticate, async (req: AuthenticatedRequest, res: Respon
       .populate('servedBy', 'name');
 
     if (!updated) return sendError(res, 'Order not found', 404);
+    
+    // Emit socket event for real-time updates
+    const normalizedUpdated = { ...updated.toObject(), status: normalizeOrderStatus(updated.status) };
+    if (nextStatus && nextStatus !== currentStatus) {
+      emitOrderStatusChanged(normalizedUpdated, currentStatus);
+    } else {
+      emitOrderUpdated(normalizedUpdated);
+    }
+    
     return sendSuccess(
       res,
-      updated ? { ...updated.toObject(), status: normalizeOrderStatus(updated.status) } : updated,
+      normalizedUpdated,
       'Order updated successfully'
     );
   } catch (error) {
@@ -688,6 +707,16 @@ router.patch("/:id/items", authenticate, async (req: AuthenticatedRequest, res: 
       .populate("customer", "name phone")
       .populate("createdBy", "name")
       .populate("servedBy", "name");
+
+    // Emit socket event for real-time updates
+    if (updated) {
+      const normalizedUpdated = { ...updated.toObject(), status: normalizeOrderStatus(updated.status) };
+      if (nextStatus && nextStatus !== currentStatus) {
+        emitOrderStatusChanged(normalizedUpdated, currentStatus);
+      } else {
+        emitOrderUpdated(normalizedUpdated);
+      }
+    }
 
     return sendSuccess(res, updated ? { ...updated.toObject(), status: normalizeOrderStatus(updated.status) } : updated, "Order items updated");
   } catch (error) {

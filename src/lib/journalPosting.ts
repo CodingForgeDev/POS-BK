@@ -4,15 +4,21 @@ import JournalEntry from "../models/JournalEntry";
 import Setting from "../models/Setting";
 import Period from "../models/Period";
 
+const roundToCents = (value: number) => Number(Number(value || 0).toFixed(2));
+
 export const normalizeJournalLines = (lines: any[]) => {
   return (lines || [])
-    .map((line) => ({
-      account: line.account,
-      accountName: String(line.accountName || "").trim(),
-      debit: Number(line.debit || 0),
-      credit: Number(line.credit || 0),
-      note: String(line.note || "").trim(),
-    }))
+    .map((line) => {
+      const debit = roundToCents(Number(line.debit || 0));
+      const credit = roundToCents(Number(line.credit || 0));
+      return {
+        account: line.account,
+        accountName: String(line.accountName || "").trim(),
+        debit,
+        credit,
+        note: String(line.note || "").trim(),
+      };
+    })
     .filter((line) =>
       line.account &&
       ((line.debit > 0 && line.credit === 0) || (line.credit > 0 && line.debit === 0))
@@ -20,8 +26,8 @@ export const normalizeJournalLines = (lines: any[]) => {
 };
 
 export const validateJournalBalance = (lines: any[]) => {
-  const totalDebit = lines.reduce((sum, line) => sum + (Number(line.debit) || 0), 0);
-  const totalCredit = lines.reduce((sum, line) => sum + (Number(line.credit) || 0), 0);
+  const totalDebit = roundToCents(lines.reduce((sum, line) => sum + (Number(line.debit) || 0), 0));
+  const totalCredit = roundToCents(lines.reduce((sum, line) => sum + (Number(line.credit) || 0), 0));
   return { totalDebit, totalCredit, balanced: totalDebit === totalCredit };
 };
 
@@ -497,7 +503,8 @@ export async function createJournalEntryRecord(payload: Record<string, unknown>)
     }
   }
 
-  for (const { accountId, debit, credit } of accountBalanceChanges.values()) {
+  for (const accountBalanceChange of Array.from(accountBalanceChanges.values())) {
+    const { accountId, debit, credit } = accountBalanceChange;
     const account = await LedgerAccount.findById(accountId).session(session || undefined).lean() as unknown as { type: string } | null;
     if (!account) continue;
     const normalDebit = ["asset", "bank", "receivable", "expense"].includes(account.type);

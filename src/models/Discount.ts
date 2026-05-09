@@ -11,6 +11,15 @@ const DiscountSchema = new mongoose.Schema(
       enum: ["entire_bill", "specific_items", "category"],
       default: "entire_bill",
     },
+    paymentMethod: {
+      type: String,
+      enum: ["cash", "card"],
+      default: "cash",
+    },
+    paymentAccountId: {
+      type: mongoose.Schema.Types.ObjectId,
+      default: null,
+    },
     applicableProducts: [{ type: mongoose.Schema.Types.ObjectId, ref: "Product" }],
     applicableCategories: [{ type: mongoose.Schema.Types.ObjectId, ref: "Category" }],
     minOrderAmount: { type: Number, default: 0 },

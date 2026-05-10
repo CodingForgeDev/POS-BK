@@ -213,7 +213,7 @@ router.get("/", authenticate, async (req: AuthenticatedRequest, res: Response) =
       operatingDate.setHours(0, 0, 0, 0);
       
       const isFilteringActiveOrders = !status || status === "all" || status === "active" || 
-        ACTIVE_ORDER_STATUSES.includes(normalizeOrderStatus(status));
+        ACTIVE_ORDER_STATUSES.some((allowedStatus) => allowedStatus === normalizeOrderStatus(status));
       
       if (isFilteringActiveOrders && counterDate) {
         // Show active orders from the current counter session onwards

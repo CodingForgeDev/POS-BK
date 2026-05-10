@@ -186,7 +186,7 @@ function sanitizeOrderItems(rawItems: unknown): NormalizedOrderItem[] {
 router.get("/", authenticate, async (req: AuthenticatedRequest, res: Response) => {
   try {
     await connectDB();
-    const { status, type, date, page = "1", limit = "50" } = req.query as Record<string, string>;
+    const { status, type, date, page = "1", limit = "50", includePreviousOpenOrders } = req.query as Record<string, string>;
 
     const query: any = {};
     if (status && status !== "all") {
@@ -203,7 +203,17 @@ router.get("/", authenticate, async (req: AuthenticatedRequest, res: Response) =
       start.setHours(0, 0, 0, 0);
       const end = new Date(date);
       end.setHours(23, 59, 59, 999);
-      query.createdAt = { $gte: start, $lte: end };
+      const isToday = date === new Date().toISOString().slice(0, 10);
+      const shouldCarryOpenPreviousOrders = includePreviousOpenOrders === "true" && isToday;
+
+      if (shouldCarryOpenPreviousOrders && (!status || status === "all")) {
+        query.$or = [
+          { createdAt: { $gte: start, $lte: end } },
+          { status: { $in: ACTIVE_ORDER_STATUSES } },
+        ];
+      } else {
+        query.createdAt = { $gte: start, $lte: end };
+      }
     }
 
     const pageNum = parseInt(page);

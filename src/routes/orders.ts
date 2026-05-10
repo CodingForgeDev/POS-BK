@@ -183,10 +183,11 @@ function sanitizeOrderItems(rawItems: unknown): NormalizedOrderItem[] {
     .filter((x): x is NormalizedOrderItem => Boolean(x));
 }
 
+// Add this query parameter handling in the GET / route
 router.get("/", authenticate, async (req: AuthenticatedRequest, res: Response) => {
   try {
     await connectDB();
-    const { status, type, date, page = "1", limit = "50" } = req.query as Record<string, string>;
+    const { status, type, date, counterDate, page = "1", limit = "50" } = req.query as Record<string, string>;
 
     const query: any = {};
     if (status && status !== "all") {
@@ -200,28 +201,34 @@ router.get("/", authenticate, async (req: AuthenticatedRequest, res: Response) =
     if (type && type !== "all") query.type = type;
     
     // Date filtering logic with 24-hour operations support
-    // For overnight cafes: when viewing today's date, show ALL active orders regardless of creation date
-    // For historical dates: filter by creation date as normal
+    // counterDate = the date the counter is currently operating on (persisted in localStorage on frontend)
+    // date = the date selected in the date picker (may differ for historical viewing)
     if (date) {
       const requestedDate = new Date(date);
-      const today = new Date();
-      today.setHours(0, 0, 0, 0);
       requestedDate.setHours(0, 0, 0, 0);
       
-      const isViewingToday = requestedDate.getTime() === today.getTime();
+      // If counterDate is provided (current operating session), use it for active order filtering
+      // This ensures we only show orders from the current counter session, not ALL historical unclosed orders
+      const operatingDate = counterDate ? new Date(counterDate) : requestedDate;
+      operatingDate.setHours(0, 0, 0, 0);
+      
       const isFilteringActiveOrders = !status || status === "all" || status === "active" || 
         ACTIVE_ORDER_STATUSES.includes(normalizeOrderStatus(status));
       
-      // Only apply date filter if viewing historical date OR not filtering for active orders
-      if (!isViewingToday || !isFilteringActiveOrders) {
-        const start = new Date(date);
+      if (isFilteringActiveOrders && counterDate) {
+        // Show active orders from the current counter session onwards
+        // This allows overnight orders to be visible but excludes old unclosed orders from days ago
+        const counterStart = new Date(operatingDate);
+        counterStart.setHours(0, 0, 0, 0);
+        query.createdAt = { $gte: counterStart };
+      } else {
+        // Historical view or completed/voided orders - strict date range
+        const start = new Date(requestedDate);
         start.setHours(0, 0, 0, 0);
-        const end = new Date(date);
+        const end = new Date(requestedDate);
         end.setHours(23, 59, 59, 999);
         query.createdAt = { $gte: start, $lte: end };
       }
-      // When viewing today with active order filters, don't restrict by createdAt
-      // This allows unclosed orders from previous days to remain visible
     }
 
     const pageNum = parseInt(page);
@@ -247,7 +254,6 @@ router.get("/", authenticate, async (req: AuthenticatedRequest, res: Response) =
     return sendError(res, "Failed to fetch orders", 500);
   }
 });
-
 router.post("/", authenticate, async (req: AuthenticatedRequest, res: Response) => {
   try {
     await connectDB();

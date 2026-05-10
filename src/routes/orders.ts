@@ -186,7 +186,7 @@ function sanitizeOrderItems(rawItems: unknown): NormalizedOrderItem[] {
 router.get("/", authenticate, async (req: AuthenticatedRequest, res: Response) => {
   try {
     await connectDB();
-    const { status, type, date, page = "1", limit = "50", includePreviousOpenOrders } = req.query as Record<string, string>;
+    const { status, type, date, page = "1", limit = "50" } = req.query as Record<string, string>;
 
     const query: any = {};
     if (status && status !== "all") {
@@ -198,22 +198,30 @@ router.get("/", authenticate, async (req: AuthenticatedRequest, res: Response) =
       }
     }
     if (type && type !== "all") query.type = type;
+    
+    // Date filtering logic with 24-hour operations support
+    // For overnight cafes: when viewing today's date, show ALL active orders regardless of creation date
+    // For historical dates: filter by creation date as normal
     if (date) {
-      const start = new Date(date);
-      start.setHours(0, 0, 0, 0);
-      const end = new Date(date);
-      end.setHours(23, 59, 59, 999);
-      const isToday = date === new Date().toISOString().slice(0, 10);
-      const shouldCarryOpenPreviousOrders = includePreviousOpenOrders === "true" && isToday;
-
-      if (shouldCarryOpenPreviousOrders && (!status || status === "all")) {
-        query.$or = [
-          { createdAt: { $gte: start, $lte: end } },
-          { status: { $in: ACTIVE_ORDER_STATUSES } },
-        ];
-      } else {
+      const requestedDate = new Date(date);
+      const today = new Date();
+      today.setHours(0, 0, 0, 0);
+      requestedDate.setHours(0, 0, 0, 0);
+      
+      const isViewingToday = requestedDate.getTime() === today.getTime();
+      const isFilteringActiveOrders = !status || status === "all" || status === "active" || 
+        ACTIVE_ORDER_STATUSES.includes(normalizeOrderStatus(status));
+      
+      // Only apply date filter if viewing historical date OR not filtering for active orders
+      if (!isViewingToday || !isFilteringActiveOrders) {
+        const start = new Date(date);
+        start.setHours(0, 0, 0, 0);
+        const end = new Date(date);
+        end.setHours(23, 59, 59, 999);
         query.createdAt = { $gte: start, $lte: end };
       }
+      // When viewing today with active order filters, don't restrict by createdAt
+      // This allows unclosed orders from previous days to remain visible
     }
 
     const pageNum = parseInt(page);

@@ -187,7 +187,7 @@ function sanitizeOrderItems(rawItems: unknown): NormalizedOrderItem[] {
 router.get("/", authenticate, async (req: AuthenticatedRequest, res: Response) => {
   try {
     await connectDB();
-    const { status, type, date, counterDate, page = "1", limit = "50" } = req.query as Record<string, string>;
+    const { status, type, counterOpenedAt, dateFrom, dateTo, page = "1", limit = "50" } = req.query as Record<string, string>;
 
     const query: any = {};
     if (status && status !== "all") {
@@ -200,35 +200,56 @@ router.get("/", authenticate, async (req: AuthenticatedRequest, res: Response) =
     }
     if (type && type !== "all") query.type = type;
     
-    // Date filtering logic with 24-hour operations support
-    // counterDate = the date the counter is currently operating on (persisted in localStorage on frontend)
-    // date = the date selected in the date picker (may differ for historical viewing)
-    if (date) {
-      const requestedDate = new Date(date);
-      requestedDate.setHours(0, 0, 0, 0);
-      
-      // If counterDate is provided (current operating session), use it for active order filtering
-      // This ensures we only show orders from the current counter session, not ALL historical unclosed orders
-      const operatingDate = counterDate ? new Date(counterDate) : requestedDate;
-      operatingDate.setHours(0, 0, 0, 0);
-      
-      const isFilteringActiveOrders = !status || status === "all" || status === "active" || 
-        ACTIVE_ORDER_STATUSES.some((allowedStatus) => allowedStatus === normalizeOrderStatus(status));
-      
-      if (isFilteringActiveOrders && counterDate) {
-        // Show active orders from the current counter session onwards
-        // This allows overnight orders to be visible but excludes old unclosed orders from days ago
-        const counterStart = new Date(operatingDate);
-        counterStart.setHours(0, 0, 0, 0);
-        query.createdAt = { $gte: counterStart };
-      } else {
-        // Historical view or completed/voided orders - strict date range
-        const start = new Date(requestedDate);
-        start.setHours(0, 0, 0, 0);
-        const end = new Date(requestedDate);
-        end.setHours(23, 59, 59, 999);
-        query.createdAt = { $gte: start, $lte: end };
+    // ── Counter session filtering (timestamp-based, ignores calendar dates) ───────
+    // When counterOpenedAt is provided (counter is open):
+    //  - Fetch ALL orders since that timestamp, regardless of calendar date
+    //  - This allows orders to span multiple calendar days (11 PM → 12 AM, etc.)
+    // When counterOpenedAt is NOT provided (counter is closed):
+    //  - Use optional dateFrom/dateTo for historical viewing
+    if (counterOpenedAt) {
+      // Primary filter: timestamp-based counter session boundary
+      const counterStart = new Date(counterOpenedAt);
+      query.createdAt = { $gte: counterStart };
+
+      // Secondary filter: optional date-range narrowing within the counter session
+      // This allows users to narrow results without breaking the counter session boundary
+      if (dateFrom || dateTo) {
+        const createdAtQuery = query.createdAt || {};
+        
+        if (dateFrom) {
+          const fromDate = new Date(dateFrom);
+          fromDate.setHours(0, 0, 0, 0);
+          // Use the later of counterStart or dateFromStart
+          createdAtQuery.$gte = new Date(
+            Math.max(counterStart.getTime(), fromDate.getTime())
+          );
+        }
+        
+        if (dateTo) {
+          const toDate = new Date(dateTo);
+          toDate.setHours(23, 59, 59, 999);
+          createdAtQuery.$lte = toDate;
+        }
+        
+        query.createdAt = createdAtQuery;
       }
+    } else if (dateFrom || dateTo) {
+      // Historical browse mode (counter closed): strict date-range filtering
+      const createdAtQuery: any = {};
+      
+      if (dateFrom) {
+        const fromDate = new Date(dateFrom);
+        fromDate.setHours(0, 0, 0, 0);
+        createdAtQuery.$gte = fromDate;
+      }
+      
+      if (dateTo) {
+        const toDate = new Date(dateTo);
+        toDate.setHours(23, 59, 59, 999);
+        createdAtQuery.$lte = toDate;
+      }
+      
+      query.createdAt = createdAtQuery;
     }
 
     const pageNum = parseInt(page);

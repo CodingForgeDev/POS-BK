@@ -187,9 +187,25 @@ function sanitizeOrderItems(rawItems: unknown): NormalizedOrderItem[] {
 router.get("/", authenticate, async (req: AuthenticatedRequest, res: Response) => {
   try {
     await connectDB();
-    const { status, type, counterOpenedAt, dateFrom, dateTo, page = "1", limit = "50" } = req.query as Record<string, string>;
-
+    const {
+      status,
+      type,
+      counterOpenedAt, // ISO timestamp of when this counter session started
+      dateFrom,
+      dateTo,
+      page = "1",
+      limit = "50",
+    } = req.query as Record<string, string>;
+ 
+    // ── Counter closed and no date range = return nothing ─────────────────
+    // This is the most important rule. A closed counter shows zero orders.
+    if (!counterOpenedAt && !dateFrom && !dateTo) {
+      return sendSuccess(res, { orders: [], total: 0, page: 1, limit: parseInt(limit) });
+    }
+ 
     const query: any = {};
+ 
+    // ── Status filter ──────────────────────────────────────────────────────
     if (status && status !== "all") {
       if (status === "active") {
         query.status = { $in: ACTIVE_ORDER_STATUSES };
@@ -198,64 +214,42 @@ router.get("/", authenticate, async (req: AuthenticatedRequest, res: Response) =
         query.status = { $in: [normalizedStatus, toLegacyStatus(normalizedStatus)] };
       }
     }
+ 
+    // ── Order type filter ──────────────────────────────────────────────────
     if (type && type !== "all") query.type = type;
-    
-    // ── Counter session filtering (timestamp-based, ignores calendar dates) ───────
-    // When counterOpenedAt is provided (counter is open):
-    //  - Fetch ALL orders since that timestamp, regardless of calendar date
-    //  - This allows orders to span multiple calendar days (11 PM → 12 AM, etc.)
-    // When counterOpenedAt is NOT provided (counter is closed):
-    //  - Use optional dateFrom/dateTo for historical viewing
+ 
+    // ── Date filter ────────────────────────────────────────────────────────
     if (counterOpenedAt) {
-      // Primary filter: timestamp-based counter session boundary
-      const counterStart = new Date(counterOpenedAt);
-      query.createdAt = { $gte: counterStart };
-
-      // Secondary filter: optional date-range narrowing within the counter session
-      // This allows users to narrow results without breaking the counter session boundary
-      if (dateFrom || dateTo) {
-        const createdAtQuery = query.createdAt || {};
-        
-        if (dateFrom) {
-          const fromDate = new Date(dateFrom);
-          fromDate.setHours(0, 0, 0, 0);
-          // Use the later of counterStart or dateFromStart
-          createdAtQuery.$gte = new Date(
-            Math.max(counterStart.getTime(), fromDate.getTime())
-          );
-        }
-        
-        if (dateTo) {
-          const toDate = new Date(dateTo);
-          toDate.setHours(23, 59, 59, 999);
-          createdAtQuery.$lte = toDate;
-        }
-        
+      // Counter is OPEN: only show orders created on or after this session's
+      // open timestamp. This is a strict timestamp comparison — not date-based.
+      // An order from 3 days ago that was never billed will NOT appear here
+      // because it was created before this counter session opened.
+      const sessionStart = new Date(counterOpenedAt);
+      if (!isNaN(sessionStart.getTime())) {
+        query.createdAt = { $gte: sessionStart };
+      }
+    } else {
+      // Counter is CLOSED but explicit date range given (historical browse)
+      const createdAtQuery: any = {};
+      if (dateFrom) {
+        const from = new Date(dateFrom);
+        from.setHours(0, 0, 0, 0);
+        if (!isNaN(from.getTime())) createdAtQuery.$gte = from;
+      }
+      if (dateTo) {
+        const to = new Date(dateTo);
+        to.setHours(23, 59, 59, 999);
+        if (!isNaN(to.getTime())) createdAtQuery.$lte = to;
+      }
+      if (Object.keys(createdAtQuery).length) {
         query.createdAt = createdAtQuery;
       }
-    } else if (dateFrom || dateTo) {
-      // Historical browse mode (counter closed): strict date-range filtering
-      const createdAtQuery: any = {};
-      
-      if (dateFrom) {
-        const fromDate = new Date(dateFrom);
-        fromDate.setHours(0, 0, 0, 0);
-        createdAtQuery.$gte = fromDate;
-      }
-      
-      if (dateTo) {
-        const toDate = new Date(dateTo);
-        toDate.setHours(23, 59, 59, 999);
-        createdAtQuery.$lte = toDate;
-      }
-      
-      query.createdAt = createdAtQuery;
     }
-
-    const pageNum = parseInt(page);
+ 
+    const pageNum  = parseInt(page);
     const limitNum = parseInt(limit);
-
-    const total = await Order.countDocuments(query);
+ 
+    const total  = await Order.countDocuments(query);
     const orders = await Order.find(query)
       .populate("customer", "name phone")
       .populate("createdBy", "name")
@@ -264,11 +258,12 @@ router.get("/", authenticate, async (req: AuthenticatedRequest, res: Response) =
       .skip((pageNum - 1) * limitNum)
       .limit(limitNum)
       .lean();
-
+ 
     const normalizedOrders = orders.map((order: any) => ({
       ...order,
       status: normalizeOrderStatus(order.status),
     }));
+ 
     return sendSuccess(res, { orders: normalizedOrders, total, page: pageNum, limit: limitNum });
   } catch (error) {
     console.error("Get orders error:", error);

@@ -216,7 +216,6 @@ export async function resolvePurchasePostingAccounts(
   const inventoryAccount = await resolveLedgerAccountBySettingOrFallback("defaultInventoryAccountId", [
     { type: "asset", subcategory: "inventory" },
     { title: /inventory|stock/i },
-    { type: "asset" },
   ]);
 
   return { inventoryAccount, paymentAccount };

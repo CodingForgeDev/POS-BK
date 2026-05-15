@@ -1,5 +1,5 @@
 import { Router, Response } from "express";
-import mongoose from "mongoose";
+import mongoose, { type ClientSession } from "mongoose";
 import { authenticate, AuthenticatedRequest } from "../middleware/auth";
 import { connectDB } from "../lib/mongodb";
 import { sendSuccess, sendError } from "../lib/utils";
@@ -15,7 +15,7 @@ import {
 
 const router: Router = Router();
 
-async function postPurchaseJournalEntry(purchase: any) {
+async function postPurchaseJournalEntry(purchase: any, session: ClientSession | null = null) {
   const amount = Number(purchase.totalAmount || 0);
   if (!amount || !purchase._id) return;
 
@@ -27,11 +27,12 @@ async function postPurchaseJournalEntry(purchase: any) {
   );
 
   if (!inventoryAccount || !paymentAccount) {
-    console.warn("Skipped purchase journal entry: missing inventory or payment account mapping");
-    return;
+    throw new Error(
+      `Missing ${!inventoryAccount ? "inventory" : "payment"} account mapping for purchase journal entry. ` +
+      "Please review default inventory account and supplier accounts payable settings."
+    );
   }
 
-  // Get supplier name for professional description
   const supplierName = purchase.supplier?.name || "Unknown Supplier";
   const reference = purchase.referenceNumber || purchase._id?.toString() || "";
   const description = `Purchase from ${supplierName}`;
@@ -53,20 +54,16 @@ async function postPurchaseJournalEntry(purchase: any) {
     },
   ];
 
-  try {
-    await createJournalEntryRecord({
-      date: purchase.receivedAt || new Date(),
-      reference,
-      description,
-      lines,
-      source: "PURCHASE",
-      sourceId: purchase._id,
-      postedBy: purchase.createdBy,
-    });
-  } catch (err: any) {
-    if (err?.message === "Journal entry already exists for this source") return;
-    console.error("Failed to create purchase journal entry:", err);
-  }
+  await createJournalEntryRecord({
+    date: purchase.receivedAt || new Date(),
+    reference,
+    description,
+    lines,
+    source: "PURCHASE",
+    sourceId: purchase._id,
+    postedBy: purchase.createdBy,
+    session,
+  });
 }
 
 router.get("/", authenticate, async (req: AuthenticatedRequest, res: Response) => {
@@ -173,6 +170,7 @@ router.post("/", authenticate, async (req: AuthenticatedRequest, res: Response) 
 
     const session = await mongoose.startSession();
     let purchasePayload: unknown;
+    let journalPostedInTransaction = false;
     try {
       await session.withTransaction(async () => {
         const { purchase } = await postPurchaseInSession(session, {
@@ -184,6 +182,8 @@ router.post("/", authenticate, async (req: AuthenticatedRequest, res: Response) 
           paymentMethod: normalizedPaymentMethod,
           userId: req.user.id,
         });
+        await postPurchaseJournalEntry(purchase, session);
+        journalPostedInTransaction = true;
         purchasePayload = purchase;
       });
     } catch (e: unknown) {
@@ -232,7 +232,7 @@ router.post("/", authenticate, async (req: AuthenticatedRequest, res: Response) 
       .populate("lines.inventoryItem", "name unit sku")
       .lean();
 
-    if (populated) {
+    if (populated && !journalPostedInTransaction) {
       await postPurchaseJournalEntry(populated);
     }
 

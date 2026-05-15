@@ -285,12 +285,29 @@ router.post("/", authenticate, async (req: AuthenticatedRequest, res: Response) 
       if (!table) {
         return sendError(res, "Table number is required for dine-in orders", 400);
       }
-      const tableTaken = await Order.exists({
+      const counterOpenedAtRaw = typeof req.body.counterOpenedAt === "string" ? req.body.counterOpenedAt : "";
+      const tableQuery: any = {
         type: "dine-in",
         tableNumber: table,
         status: { $in: ACTIVE_ORDER_STATUSES },
-      });
+      };
+      if (counterOpenedAtRaw) {
+        const counterOpenedAtDate = new Date(counterOpenedAtRaw);
+        if (!Number.isNaN(counterOpenedAtDate.getTime())) {
+          tableQuery.createdAt = { $gte: counterOpenedAtDate };
+        }
+      }
+      const tableTaken = await Order.exists(tableQuery);
       if (tableTaken) {
+        console.warn(
+          "Dine-in create order blocked for occupied table:",
+          {
+            table,
+            counterOpenedAt: counterOpenedAtRaw || null,
+            userId: req.user?.id,
+            userRole: req.user?.role,
+          }
+        );
         return sendError(res, `Table ${table} is already occupied`, 409);
       }
     }

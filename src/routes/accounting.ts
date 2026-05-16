@@ -92,8 +92,11 @@ async function assertSingleInventoryAccount(
 router.get("/accounts", authenticate, async (req: AuthenticatedRequest, res: Response) => {
   try {
     await connectDB();
-    const { type, subcategory, search, linkedEmployee } = req.query as Record<string, string>;
-    const query: any = { isActive: true };
+    const { type, subcategory, search, linkedEmployee, includeInactive } = req.query as Record<string, string>;
+    const query: any = {};
+    if (includeInactive !== "true") {
+      query.isActive = true;
+    }
     if (type) {
       const typeValue = String(type).trim();
       if (typeValue === "asset") {

@@ -99,7 +99,7 @@ router.post("/supplier", authenticate, async (req: AuthenticatedRequest, res: Re
 
     let purchaseReference = "";
     if (purchaseId && mongoose.Types.ObjectId.isValid(purchaseId)) {
-      const purchase = await Purchase.findById(purchaseId).select("referenceNumber").lean();
+      const purchase = (await Purchase.findById(purchaseId).select("referenceNumber").lean()) as { referenceNumber?: string } | null;
       if (purchase?.referenceNumber) {
         purchaseReference = purchase.referenceNumber;
       }
@@ -251,7 +251,7 @@ router.post("/customer", authenticate, async (req: AuthenticatedRequest, res: Re
 
     let invoiceReference = "";
     if (invoiceId && mongoose.Types.ObjectId.isValid(invoiceId)) {
-      const invoice = await Invoice.findById(invoiceId).select("invoiceNumber").lean();
+      const invoice = (await Invoice.findById(invoiceId).select("invoiceNumber").lean()) as { invoiceNumber?: string } | null;
       if (invoice?.invoiceNumber) {
         invoiceReference = invoice.invoiceNumber;
       }

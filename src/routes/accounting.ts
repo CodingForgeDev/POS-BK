@@ -364,7 +364,8 @@ router.post("/accounts", authenticate, async (req: AuthenticatedRequest, res: Re
     if ((error as any).code === 11000) {
       const duplicateField = Object.keys((error as any).keyPattern || {})[0];
       if (duplicateField === 'code') {
-        return sendError(res, `Account code "${code}" already exists. Please use a different code.`, 409);
+        const requestedCode = `${(req as any).body?.code || ""}`.trim();
+        return sendError(res, `Account code "${requestedCode}" already exists. Please use a different code.`, 409);
       }
       return sendError(res, `Duplicate ${duplicateField}: already exists`, 409);
     }

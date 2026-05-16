@@ -359,6 +359,29 @@ router.post("/accounts", authenticate, async (req: AuthenticatedRequest, res: Re
     return sendSuccess(res, account, "Account created", 201);
   } catch (error) {
     console.error("Accounting create account error:", error);
+    
+    // Handle MongoDB duplicate key error
+    if ((error as any).code === 11000) {
+      const duplicateField = Object.keys((error as any).keyPattern || {})[0];
+      if (duplicateField === 'code') {
+        return sendError(res, `Account code "${code}" already exists. Please use a different code.`, 409);
+      }
+      return sendError(res, `Duplicate ${duplicateField}: already exists`, 409);
+    }
+    
+    // Handle validation errors
+    if ((error as any).name === 'ValidationError') {
+      const validationErrors = Object.values((error as any).errors || {})
+        .map((err: any) => err.message)
+        .join(', ');
+      return sendError(res, `Validation failed: ${validationErrors}`, 400);
+    }
+    
+    // Handle other known errors
+    if ((error as Error).message) {
+      return sendError(res, (error as Error).message, 500);
+    }
+    
     return sendError(res, "Failed to create account", 500);
   }
 });

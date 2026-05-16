@@ -7,12 +7,22 @@ import Supplier from "../models/Supplier";
 import Customer from "../models/Customer";
 import LedgerAccount from "../models/LedgerAccount";
 import Purchase from "../models/Purchase";
+import Invoice from "../models/Invoice";
 import StockLayer from "../models/StockLayer";
 import JournalEntry from "../models/JournalEntry";
 import { createJournalEntryRecord } from "../lib/journalPosting";
 import { resolveExpensePaymentAccount } from "../lib/journalPosting";
 import { logAuditTrail } from "../lib/auditLog";
 import mongoose from "mongoose";
+
+function generatePaymentReferenceNumber(prefix: string): string {
+  const now = new Date();
+  const year = String(now.getFullYear());
+  const month = String(now.getMonth() + 1).padStart(2, "0");
+  const day = String(now.getDate()).padStart(2, "0");
+  const randomSegment = String(Math.floor(Math.random() * 9000) + 1000);
+  return `${prefix}-${year}${month}-${day}-${randomSegment}`;
+}
 
 const router: Router = Router();
 
@@ -71,6 +81,8 @@ router.post("/supplier", authenticate, async (req: AuthenticatedRequest, res: Re
     
     const recordedBy = (req.user as any)._id || req.user.id;
 
+    const paymentReference = String(referenceNumber || "").trim() || generatePaymentReferenceNumber("PAY");
+
     // Create payment record
     const payment = await Payment.create({
       type: "supplier",
@@ -78,19 +90,28 @@ router.post("/supplier", authenticate, async (req: AuthenticatedRequest, res: Re
       amount: amountValue,
       paymentDate: paymentDateValue,
       paymentMethod: paymentMethod || "cash",
-      referenceNumber: referenceNumber || "",
+      referenceNumber: paymentReference,
       notes: notes || "",
       purchaseId: purchaseId || null,
       recordedBy,
       status: "posted",
     });
-    
+
+    let purchaseReference = "";
+    if (purchaseId && mongoose.Types.ObjectId.isValid(purchaseId)) {
+      const purchase = await Purchase.findById(purchaseId).select("referenceNumber").lean();
+      if (purchase?.referenceNumber) {
+        purchaseReference = purchase.referenceNumber;
+      }
+    }
+
     // Post journal entry: Debit A/P (reduces liability), Credit Cash/Bank (reduces asset)
     try {
+      const journalReference = payment.referenceNumber;
       const journalEntry = await createJournalEntryRecord({
         date: payment.paymentDate,
-        reference: payment.referenceNumber || `PAY-${payment._id}`,
-        description: `Payment to ${supplier.name}${purchaseId ? ` for purchase ${purchaseId}` : ""}`,
+        reference: journalReference,
+        description: `Payment to ${supplier.name}${purchaseReference ? ` for purchase ${purchaseReference}` : purchaseId ? ` for purchase ${purchaseId}` : ""}`,
         lines: [
           {
             account: supplierApAccount._id,
@@ -212,6 +233,8 @@ router.post("/customer", authenticate, async (req: AuthenticatedRequest, res: Re
     
     const recordedBy = (req.user as any)._id || req.user.id;
 
+    const paymentReference = String(referenceNumber || "").trim() || generatePaymentReferenceNumber("REC");
+
     // Create payment record
     const payment = await Payment.create({
       type: "customer",
@@ -219,19 +242,28 @@ router.post("/customer", authenticate, async (req: AuthenticatedRequest, res: Re
       amount: amountValue,
       paymentDate: paymentDateValue,
       paymentMethod: paymentMethod || "cash",
-      referenceNumber: referenceNumber || "",
+      referenceNumber: paymentReference,
       notes: notes || "",
       invoiceId: invoiceId || null,
       recordedBy,
       status: "posted",
     });
-    
+
+    let invoiceReference = "";
+    if (invoiceId && mongoose.Types.ObjectId.isValid(invoiceId)) {
+      const invoice = await Invoice.findById(invoiceId).select("invoiceNumber").lean();
+      if (invoice?.invoiceNumber) {
+        invoiceReference = invoice.invoiceNumber;
+      }
+    }
+
     // Post journal entry: Debit Cash/Bank (increases asset), Credit A/R (reduces asset)
     try {
+      const journalReference = payment.referenceNumber;
       const journalEntry = await createJournalEntryRecord({
         date: payment.paymentDate,
-        reference: payment.referenceNumber || `REC-${payment._id}`,
-        description: `Payment from ${customer.name}${invoiceId ? ` for invoice ${invoiceId}` : ""}`,
+        reference: journalReference,
+        description: `Payment from ${customer.name}${invoiceReference ? ` for invoice ${invoiceReference}` : invoiceId ? ` for invoice ${invoiceId}` : ""}`,
         lines: [
           {
             account: paymentAccount._id,
@@ -329,6 +361,8 @@ router.get("/", authenticate, async (req: AuthenticatedRequest, res: Response) =
     const payments = await Payment.find(query)
       .populate("supplierId", "name")
       .populate("customerId", "name")
+      .populate("purchaseId", "referenceNumber")
+      .populate("invoiceId", "invoiceNumber")
       .populate("recordedBy", "name")
       .sort({ paymentDate: -1 })
       .skip((pageNum - 1) * limitNum)

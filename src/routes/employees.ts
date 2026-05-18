@@ -157,7 +157,14 @@ router.get("/", authenticate, async (req: AuthenticatedRequest, res: Response) =
       if (role?.viewStaffLogins === "all") showAll = true;
     }
 
-    const query = showAll ? { isActive: true } : { user: req.user.id, isActive: true };
+    const status = String(req.query.status || "all").toLowerCase();
+    const query = showAll ? {} : { user: req.user.id };
+
+    if (status === "active") {
+      query.isActive = true;
+    } else if (status === "inactive") {
+      query.isActive = false;
+    }
 
     const employees = await Employee.find(query)
       .populate("user", "name email phone role avatar")

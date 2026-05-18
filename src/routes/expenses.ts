@@ -166,7 +166,11 @@ router.post("/", authenticate, async (req: AuthenticatedRequest, res: Response) 
       req.body.linkedEmployee = null;
       req.body.employeeSalaryType = null;
     }
-    
+
+    if (req.body.paymentAccountId) {
+      req.body.paymentAccount = req.body.paymentAccountId;
+    }
+    delete req.body.paymentAccountId;
     delete req.body.linkedEmployeeId; // Remove if present from frontend
     const requestedRef = String(req.body.referenceNumber || "").trim();
     const referenceNumber = requestedRef || generateExpenseReferenceNumber();
@@ -209,7 +213,11 @@ router.patch("/:id", authenticate, async (req: AuthenticatedRequest, res: Respon
       req.body.linkedEmployee = null;
       req.body.employeeSalaryType = null;
     }
-    
+
+    if (req.body.paymentAccountId) {
+      req.body.paymentAccount = req.body.paymentAccountId;
+    }
+    delete req.body.paymentAccountId;
     delete req.body.linkedEmployeeId;
     const expense = await Expense.findByIdAndUpdate(req.params.id, req.body, { new: true });
     if (!expense) return sendError(res, "Expense not found", 404);

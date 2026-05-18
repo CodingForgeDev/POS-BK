@@ -1,12 +1,13 @@
 /**
  * GST rate helpers for server-side tax calculation.
  * Supports per-payment-method rates (e.g. cash 16%, card 5%).
+ * GST is calculated as EXCLUSIVE (added on top): tax = amount * rate / 100
  */
 import Setting from "../models/Setting";
 
-const DEFAULT_GST_RATE = 10;
+const DEFAULT_GST_RATE = 16; // Changed to 16% for Pakistan standard
 const DEFAULT_GST_RATES: Record<string, number> = {
-  default: DEFAULT_GST_RATE,
+  default: 16, // Default to 16% (cash)
   cash: 16,
   card: 5,
   debit_card: 5,

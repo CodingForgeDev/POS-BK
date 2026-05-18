@@ -305,20 +305,48 @@ export async function createReturnJournalEntry(returnRecord: any, session: Clien
     selectedAccount = await selectedQuery;
   }
 
-  const paymentAccount = selectedAccount ||
-    (returnType === "sale"
-      ? await findLedgerAccountByFallback(
-          { type: { $in: ["asset", "bank", "receivable"] }, title: /cash|bank|receivable|customer/i },
-          { type: "asset" },
-          { type: "bank" },
-          { type: "receivable" }
-        )
-      : await findLedgerAccountByFallback(
-          { type: { $in: ["liability"] }, title: /payable|supplier|credit/i },
-          { type: "liability" },
-          { type: "bank" },
-          { type: "asset" }
-        ));
+  let paymentAccount: any = null;
+  
+  if (selectedAccount) {
+    paymentAccount = selectedAccount;
+  } else if (returnType === "sale") {
+    paymentAccount = await findLedgerAccountByFallback(
+      { type: { $in: ["asset", "bank", "receivable"] }, title: /cash|bank|receivable|customer/i },
+      { type: "asset" },
+      { type: "bank" },
+      { type: "receivable" }
+    );
+  } else {
+    // For purchase returns, try to get supplier from linked purchase
+    let supplierId: string | null = null;
+    if (returnRecord.purchaseId && mongoose.Types.ObjectId.isValid(String(returnRecord.purchaseId))) {
+      const Purchase = mongoose.models.Purchase || mongoose.model("Purchase");
+      const purchaseQuery = Purchase.findById(returnRecord.purchaseId).select("supplier").lean();
+      if (session) purchaseQuery.session(session);
+      const purchase = await purchaseQuery;
+      if (purchase?.supplier) {
+        supplierId = String(purchase.supplier);
+      }
+    }
+
+    // Try supplier-specific payable first, then default accounts payable
+    if (supplierId) {
+      paymentAccount = await resolveFirstLedgerAccount([
+        { type: "liability", subcategory: "accounts-payable", supplierId },
+        { type: "liability", subcategory: "payable", supplierId },
+        { type: "liability", supplierId },
+      ]);
+    }
+
+    // Fallback to default Accounts Payable (not generic liability which includes GST)
+    if (!paymentAccount) {
+      paymentAccount = await resolveLedgerAccountBySettingOrFallback("defaultAPAccountId", [
+        { type: "liability", subcategory: "accounts-payable" },
+        { type: "liability", subcategory: "payable", title: /payable|supplier|creditor|account.*payable/i },
+        { type: "liability", title: /account.*payable|payable.*account|supplier.*payable|creditor/i },
+      ]);
+    }
+  }
 
   const contraAccount =
     returnType === "sale"
@@ -538,6 +566,97 @@ export async function reverseJournalEntryRecord(originalEntry: any, payload: Rec
     date: payload.date || new Date(),
     reference: String(payload.reference || `REV-${originalEntry.reference || originalEntry._id}`).trim(),
     description: String(payload.description || `Reversal of journal ${originalEntry.reference || originalEntry._id}`).trim(),
+    lines: reversalLines,
+    source: "MANUAL",
+    sourceId: null,
+    postedBy: payload.postedBy || null,
+    status: String(payload.status || "posted"),
+  });
+}
+
+/**
+ * Create a full sale return journal reversal, with option to change payment account based on refund method
+ * This reverses ALL accounts from the original sale (revenue, COGS, inventory, GST, receivables)
+ * and allows selecting different payment method (cash vs bank)
+ */
+export async function createSaleReturnJournalReversal(
+  originalEntry: any,
+  refundMethod: string = "cash",
+  payload: Record<string, unknown> = {}
+) {
+  if (!originalEntry || !Array.isArray(originalEntry.lines) || originalEntry.lines.length === 0) {
+    throw new Error("Original journal entry is required for reversal");
+  }
+
+  // Validate refund method
+  const validMethods = ["cash", "bank"];
+  const normalizedMethod = String(refundMethod || "cash").trim().toLowerCase();
+  if (!validMethods.includes(normalizedMethod)) {
+    throw new Error(`Invalid refund method: ${normalizedMethod}. Must be one of: ${validMethods.join(", ")}`);
+  }
+
+  // Reverse all lines and handle payment account substitution
+  let reversalLines: any[] = [];
+  let paymentLineIndex = -1;
+  let paymentLineFound = false;
+
+  for (let i = 0; i < originalEntry.lines.length; i++) {
+    const line = originalEntry.lines[i];
+    const reversedLine = {
+      account: line.account,
+      accountName: line.accountName,
+      debit: Number(line.credit || 0),
+      credit: Number(line.debit || 0),
+      note: `Reversal of: ${String(line.note || line.accountName || "journal line")}`,
+    };
+
+    // Try to detect if this is the payment account line (first debit line or line with cash/bank keywords)
+    if (!paymentLineFound && Number(line.debit || 0) > 0) {
+      const noteStr = String(line.note || "").toLowerCase();
+      const accountNameStr = String(line.accountName || "").toLowerCase();
+      
+      // Check if this looks like a payment line (POS order line is typically the first one)
+      if (noteStr.includes("pos order") || accountNameStr.match(/cash|bank|receivable|customer/i)) {
+        paymentLineIndex = reversalLines.length;
+        paymentLineFound = true;
+      }
+    }
+
+    reversalLines.push(reversedLine);
+  }
+
+  // If payment line found, replace its account with the selected refund method account
+  if (paymentLineFound && paymentLineIndex >= 0) {
+    let newPaymentAccount: any = null;
+    
+    if (normalizedMethod === "cash") {
+      newPaymentAccount = await findLedgerAccountByFallback(
+        { type: "asset", title: /cash|petty/i },
+        { type: "asset", title: /cash/i },
+        { type: "bank", title: /cash/i }
+      );
+    } else if (normalizedMethod === "bank") {
+      newPaymentAccount = await findLedgerAccountByFallback(
+        { type: "bank", title: /bank|cheque/i },
+        { type: "asset", title: /bank/i },
+        { type: "asset", title: /receivable/i }
+      );
+    }
+
+    if (newPaymentAccount) {
+      reversalLines[paymentLineIndex].account = newPaymentAccount._id;
+      reversalLines[paymentLineIndex].accountName = newPaymentAccount.title;
+      reversalLines[paymentLineIndex].note = `Refund (${normalizedMethod}): ${reversalLines[paymentLineIndex].note}`;
+    }
+  }
+
+  return createJournalEntryRecord({
+    date: payload.date || new Date(),
+    reference: String(payload.reference || `REV-${originalEntry.reference || originalEntry._id}`).trim(),
+    description: String(
+      payload.description ||
+      `Full sale return reversal (${normalizedMethod}) for ${originalEntry.reference || originalEntry._id}`
+    ).trim(),
     lines: reversalLines,
     source: "MANUAL",
     sourceId: null,

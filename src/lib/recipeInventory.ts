@@ -462,6 +462,7 @@ async function runBillingInSession(s: ClientSession | null, input: BillingRecipe
         subtotal: order.subtotal,
         taxRate: gstRatePct,
         taxAmount,
+        gstRatePct,
         discountType: discountType || "none",
         discountValue: discountValue || 0,
         discountAmount,

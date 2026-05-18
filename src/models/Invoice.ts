@@ -33,6 +33,7 @@ const RefundRequestSchema = new mongoose.Schema(
     notes: { type: String },
     code: { type: String },
     items: { type: [RefundRequestItemSchema] },
+    refundMethod: { type: String, enum: ["cash", "bank"], default: "cash" },
     status: {
       type: String,
       enum: ["pending", "approved", "rejected"],
@@ -69,6 +70,7 @@ const InvoiceSchema = new mongoose.Schema(
     subtotal: { type: Number, required: true },
     taxRate: { type: Number, default: 10 },
     taxAmount: { type: Number, default: 0 },
+    gstRatePct: { type: Number, default: 16 },
     discountType: {
       type: String,
       enum: ["percentage", "fixed", "none"],

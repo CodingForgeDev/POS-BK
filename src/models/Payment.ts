@@ -42,6 +42,16 @@ const PaymentSchema = new mongoose.Schema(
       enum: ["cash", "bank_transfer", "card", "cheque"],
       default: "cash",
     },
+    paymentAccount: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "LedgerAccount",
+      default: null,
+    },
+    paymentAccountName: {
+      type: String,
+      default: "",
+      trim: true,
+    },
     
     // Reference and notes
     referenceNumber: {

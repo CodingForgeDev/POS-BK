@@ -9,7 +9,7 @@ import JournalEntry from "../models/JournalEntry";
 import { isAdminOrManagerRoleName } from "../lib/role-utils";
 import Customer from "../models/Customer";
 import { getGstRateForMethod } from "../lib/gst";
-import { reverseJournalEntryRecord } from "../lib/journalPosting";
+import { reverseJournalEntryRecord, createSaleReturnJournalReversal } from "../lib/journalPosting";
 import {
   executeBillingWithRecipeConsumption,
   InsufficientStockError,
@@ -106,7 +106,7 @@ function generateRefundRequestCode() {
   return `RF-${dateCode}-${timeCode}-${randomSegment}`;
 }
 
-async function reverseSaleJournalForInvoice(invoice: any, postedBy: any) {
+async function reverseSaleJournalForInvoice(invoice: any, postedBy: any, refundMethod: string = "cash") {
   if (!invoice || !invoice.order) {
     return null;
   }
@@ -123,7 +123,7 @@ async function reverseSaleJournalForInvoice(invoice: any, postedBy: any) {
     return existingReversal;
   }
 
-  return reverseJournalEntryRecord(originalSale, {
+  return createSaleReturnJournalReversal(originalSale, refundMethod, {
     reference: reversalReference,
     postedBy,
     status: "posted",
@@ -315,6 +315,11 @@ router.post(
         return sendError(res, "Refund reason is required", 400);
       }
 
+      const refundMethod = String(req.body.refundMethod ?? "cash").trim().toLowerCase();
+      if (!["cash", "bank"].includes(refundMethod)) {
+        return sendError(res, "Refund method must be 'cash' or 'bank'", 400);
+      }
+
       const rawItems = Array.isArray(req.body.items) ? req.body.items : [];
       if (!rawItems.length) {
         return sendError(res, "Select at least one item to refund", 400);
@@ -395,6 +400,7 @@ router.post(
         requestedAt: new Date(),
         notes,
         items: validItems,
+        refundMethod,
         status: "pending",
         approvedBy: null,
         approvedAt: null,
@@ -485,7 +491,7 @@ router.post(
       if (newStatus === "refunded") {
         const updatedInvoice = await Invoice.findById(id).lean();
         if (updatedInvoice) {
-          await reverseSaleJournalForInvoice(updatedInvoice, req.user.id);
+          await reverseSaleJournalForInvoice(updatedInvoice, req.user.id, invoice.refundRequest?.refundMethod || "cash");
         }
       }
 

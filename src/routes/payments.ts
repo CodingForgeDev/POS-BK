@@ -34,7 +34,7 @@ router.post("/supplier", authenticate, async (req: AuthenticatedRequest, res: Re
   try {
     await connectDB();
     
-    const { supplierId, amount, paymentDate, paymentMethod, referenceNumber, notes, purchaseId } = req.body;
+    const { supplierId, amount, paymentDate, paymentMethod, referenceNumber, notes, purchaseId, paymentAccountId } = req.body;
     const amountValue = Number(amount);
     const paymentDateValue = paymentDate ? new Date(paymentDate) : new Date();
     
@@ -74,7 +74,17 @@ router.post("/supplier", authenticate, async (req: AuthenticatedRequest, res: Re
     }
     
     // Get payment account (cash/bank based on payment method)
-    const paymentAccount = await resolveExpensePaymentAccount(paymentMethod || "cash");
+    let paymentAccount = null;
+    if (paymentAccountId) {
+      if (!mongoose.Types.ObjectId.isValid(paymentAccountId)) {
+        return sendError(res, "Selected payment account is invalid", 400);
+      }
+      paymentAccount = await LedgerAccount.findById(paymentAccountId);
+      if (!paymentAccount) {
+        return sendError(res, "Selected payment account was not found", 400);
+      }
+    }
+    paymentAccount = paymentAccount || await resolveExpensePaymentAccount(paymentMethod || "cash");
     if (!paymentAccount) {
       return sendError(res, "No payment account found for the selected payment method", 400);
     }
@@ -90,6 +100,8 @@ router.post("/supplier", authenticate, async (req: AuthenticatedRequest, res: Re
       amount: amountValue,
       paymentDate: paymentDateValue,
       paymentMethod: paymentMethod || "cash",
+      paymentAccount: paymentAccount._id,
+      paymentAccountName: paymentAccount.title,
       referenceNumber: paymentReference,
       notes: notes || "",
       purchaseId: purchaseId || null,
@@ -160,7 +172,7 @@ router.post("/supplier", authenticate, async (req: AuthenticatedRequest, res: Re
         action: "CREATE_SUPPLIER_PAYMENT",
         module: "payments",
         description: `Recorded payment to supplier ${supplier.name} - Rs ${amount}`,
-        metadata: { paymentId: payment._id, supplierId, amount, paymentMethod, purchaseId },
+        metadata: { paymentId: payment._id, supplierId, amount, paymentMethod, paymentAccountId: paymentAccount._id, purchaseId },
       });
     } catch (journalError: any) {
       console.error("⚠️ Failed to post payment journal entry:", journalError);
@@ -186,7 +198,7 @@ router.post("/customer", authenticate, async (req: AuthenticatedRequest, res: Re
   try {
     await connectDB();
     
-    const { customerId, amount, paymentDate, paymentMethod, referenceNumber, notes, invoiceId } = req.body;
+    const { customerId, amount, paymentDate, paymentMethod, referenceNumber, notes, invoiceId, paymentAccountId } = req.body;
     const amountValue = Number(amount);
     const paymentDateValue = paymentDate ? new Date(paymentDate) : new Date();
     
@@ -226,7 +238,17 @@ router.post("/customer", authenticate, async (req: AuthenticatedRequest, res: Re
     }
     
     // Get payment account (cash/bank based on payment method)
-    const paymentAccount = await resolveExpensePaymentAccount(paymentMethod || "cash");
+    let paymentAccount = null;
+    if (paymentAccountId) {
+      if (!mongoose.Types.ObjectId.isValid(paymentAccountId)) {
+        return sendError(res, "Selected payment account is invalid", 400);
+      }
+      paymentAccount = await LedgerAccount.findById(paymentAccountId);
+      if (!paymentAccount) {
+        return sendError(res, "Selected payment account was not found", 400);
+      }
+    }
+    paymentAccount = paymentAccount || await resolveExpensePaymentAccount(paymentMethod || "cash");
     if (!paymentAccount) {
       return sendError(res, "No payment account found for the selected payment method", 400);
     }
@@ -242,6 +264,8 @@ router.post("/customer", authenticate, async (req: AuthenticatedRequest, res: Re
       amount: amountValue,
       paymentDate: paymentDateValue,
       paymentMethod: paymentMethod || "cash",
+      paymentAccount: paymentAccount._id,
+      paymentAccountName: paymentAccount.title,
       referenceNumber: paymentReference,
       notes: notes || "",
       invoiceId: invoiceId || null,
@@ -313,7 +337,7 @@ router.post("/customer", authenticate, async (req: AuthenticatedRequest, res: Re
         action: "CREATE_CUSTOMER_PAYMENT",
         module: "payments",
         description: `Recorded payment from customer ${customer.name} - Rs ${amount}`,
-        metadata: { paymentId: payment._id, customerId, amount, paymentMethod, invoiceId },
+        metadata: { paymentId: payment._id, customerId, amount, paymentMethod, paymentAccountId: paymentAccount._id, invoiceId },
       });
     } catch (journalError: any) {
       console.error("⚠️ Failed to post payment journal entry:", journalError);
@@ -363,6 +387,7 @@ router.get("/", authenticate, async (req: AuthenticatedRequest, res: Response) =
       .populate("customerId", "name")
       .populate("purchaseId", "referenceNumber")
       .populate("invoiceId", "invoiceNumber")
+      .populate("paymentAccount", "title code")
       .populate("recordedBy", "name")
       .sort({ paymentDate: -1 })
       .skip((pageNum - 1) * limitNum)
@@ -387,6 +412,7 @@ router.get("/:id", authenticate, async (req: AuthenticatedRequest, res: Response
     const payment = await Payment.findById(req.params.id)
       .populate("supplierId")
       .populate("customerId")
+      .populate("paymentAccount", "title code")
       .populate("recordedBy", "name")
       .populate("journalEntryId");
     

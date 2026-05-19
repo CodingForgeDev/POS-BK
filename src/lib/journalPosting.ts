@@ -323,7 +323,7 @@ export async function createReturnJournalEntry(returnRecord: any, session: Clien
       const Purchase = mongoose.models.Purchase || mongoose.model("Purchase");
       const purchaseQuery = Purchase.findById(returnRecord.purchaseId).select("supplier").lean();
       if (session) purchaseQuery.session(session);
-      const purchase = await purchaseQuery;
+      const purchase = (await purchaseQuery) as { supplier?: unknown } | null;
       if (purchase?.supplier) {
         supplierId = String(purchase.supplier);
       }

@@ -158,7 +158,7 @@ router.get("/", authenticate, async (req: AuthenticatedRequest, res: Response) =
     }
 
     const status = String(req.query.status || "all").toLowerCase();
-    const query = showAll ? {} : { user: req.user.id };
+    const query: Record<string, unknown> = showAll ? {} : { user: req.user.id };
 
     if (status === "active") {
       query.isActive = true;

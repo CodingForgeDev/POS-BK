@@ -27,7 +27,13 @@ export function canTransitionOrderStatus(roleRaw: string, fromRaw: string, toRaw
     return !["closed", "cancelled", "rejected"].includes(from);
   }
   if (role === "waiter") {
-    return (from === "created" && to === "sent") || (from === "ready" && to === "served");
+    return (
+      (from === "created" && to === "sent") ||
+      (from === "ready" && to === "served") ||
+      (from === "created" && to === "rejected") ||  // Allow waiters to reject new orders
+      (from === "sent" && to === "rejected") ||      // Allow waiters to reject sent orders
+      (from === "accepted" && to === "rejected")     // Allow waiters to reject accepted orders
+    );
   }
   if (role === "kitchen" || role === "bar") {
     return (

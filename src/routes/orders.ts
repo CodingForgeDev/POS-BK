@@ -193,13 +193,19 @@ router.get("/", authenticate, async (req: AuthenticatedRequest, res: Response) =
       counterOpenedAt, // ISO timestamp of when this counter session started
       dateFrom,
       dateTo,
+      occupiedOnly, // Special flag: fetch all active occupied tables (no session filtering)
+      allActive, // Special flag: non-billing roles fetch their active orders (no session filtering)
+      allOrders, // Special flag: non-billing roles with date filter fetch all statuses in date range
       page = "1",
       limit = "50",
     } = req.query as Record<string, string>;
  
-    // ── Counter closed and no date range = return nothing ─────────────────
-    // This is the most important rule. A closed counter shows zero orders.
-    if (!counterOpenedAt && !dateFrom && !dateTo) {
+    // ── Counter closed and no date range = return nothing (EXCEPT for special flags) ─
+    // occupiedOnly=true: fetch all active occupied tables regardless of counter session
+    // allActive=true: non-billing roles fetch their active orders (no counter gating)
+    // allOrders=true: non-billing roles with date filters fetch all statuses for that range
+    // These special flags bypass the counter session check to show actual restaurant state
+    if (!occupiedOnly && !allActive && !allOrders && !counterOpenedAt && !dateFrom && !dateTo) {
       return sendSuccess(res, { orders: [], total: 0, page: 1, limit: parseInt(limit) });
     }
  
@@ -219,17 +225,40 @@ router.get("/", authenticate, async (req: AuthenticatedRequest, res: Response) =
     if (type && type !== "all") query.type = type;
  
     // ── Date filter ────────────────────────────────────────────────────────
-    if (counterOpenedAt) {
-      // Counter is OPEN: only show orders created on or after this session's
-      // open timestamp. This is a strict timestamp comparison — not date-based.
-      // An order from 3 days ago that was never billed will NOT appear here
-      // because it was created before this counter session opened.
-      const sessionStart = new Date(counterOpenedAt);
-      if (!isNaN(sessionStart.getTime())) {
-        query.createdAt = { $gte: sessionStart };
+    // When allActive=true or occupiedOnly=true, skip date filtering entirely.
+    // When allOrders=true, apply date range filtering (for browsing historical completed orders)
+    // allActive: Non-billing roles see all their active orders (no session gating)
+    // occupiedOnly: Table picker shows all active occupied tables
+    // allOrders: Historical browse with date range (all statuses, no session gating)
+    if (!occupiedOnly && !allActive && !allOrders) {
+      if (counterOpenedAt) {
+        // Counter is OPEN: only show orders created on or after this session's
+        // open timestamp. This is a strict timestamp comparison — not date-based.
+        // An order from 3 days ago that was never billed will NOT appear here
+        // because it was created before this counter session opened.
+        const sessionStart = new Date(counterOpenedAt);
+        if (!isNaN(sessionStart.getTime())) {
+          query.createdAt = { $gte: sessionStart };
+        }
+      } else {
+        // Counter is CLOSED but explicit date range given (historical browse)
+        const createdAtQuery: any = {};
+        if (dateFrom) {
+          const from = new Date(dateFrom);
+          from.setHours(0, 0, 0, 0);
+          if (!isNaN(from.getTime())) createdAtQuery.$gte = from;
+        }
+        if (dateTo) {
+          const to = new Date(dateTo);
+          to.setHours(23, 59, 59, 999);
+          if (!isNaN(to.getTime())) createdAtQuery.$lte = to;
+        }
+        if (Object.keys(createdAtQuery).length) {
+          query.createdAt = createdAtQuery;
+        }
       }
-    } else {
-      // Counter is CLOSED but explicit date range given (historical browse)
+    } else if (allOrders) {
+      // allOrders=true: apply date range only (for non-billing roles browsing history)
       const createdAtQuery: any = {};
       if (dateFrom) {
         const from = new Date(dateFrom);
@@ -533,6 +562,12 @@ router.patch("/:id", authenticate, async (req: AuthenticatedRequest, res: Respon
     if (nextStatus && !canTransitionOrderStatus(req.user.role, currentStatus, nextStatus)) {
       return sendError(res, "Unauthorized status transition", 403);
     }
+    // Billing-only gate: only hasBilling users can close/complete orders
+    if (nextStatus === 'closed' || nextStatus === 'completed') {
+      if (req.user.hasBilling !== true) {
+        return sendError(res, "Billing permission required to close orders", 403);
+      }
+    }
     if (nextStatus === 'preparing' && !station) {
       const stationKey = order.items.some((item: any) => item.station === 'kitchen') && !order.items.some((item: any) => item.station === 'bar')
         ? 'kitchen'
@@ -714,6 +749,8 @@ router.patch("/:id/items", authenticate, async (req: AuthenticatedRequest, res: 
     if (nextStatus && !canTransitionOrderStatus(req.user.role, currentStatus, nextStatus)) {
       return sendError(res, "Unauthorized status transition", 403);
     }
+    // All authenticated users can close/complete orders (waiter, cashier, admin, manager, kitchen)
+    // Only counter session close is restricted to billing roles (managed in OrdersPage)
 
     if (nextStatus && ["accepted", "preparing", "ready", "served"].includes(nextStatus)) {
       updatePayload.status = toLegacyStatus(nextStatus);

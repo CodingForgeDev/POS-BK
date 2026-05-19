@@ -1,6 +1,6 @@
 import mongoose from "mongoose";
 import { Router, Response } from "express";
-import { authenticate, AuthenticatedRequest } from "../middleware/auth";
+import { authenticate, AuthenticatedRequest, requireBilling } from "../middleware/auth";
 import { connectDB } from "../lib/mongodb";
 import { sendSuccess, sendError, generateInvoiceNumber } from "../lib/utils";
 import Invoice from "../models/Invoice";
@@ -300,6 +300,7 @@ router.get("/:id", authenticate, async (req: AuthenticatedRequest, res: Response
 router.post(
   "/:id/refund-requests",
   authenticate,
+  requireBilling,
   async (req: AuthenticatedRequest, res: Response) => {
     try {
       await connectDB();
@@ -607,14 +608,12 @@ router.post(
 );
 
 // POST /billing — create invoice
+// All authenticated users can checkout and process payments (waiter, cashier, admin, manager, kitchen)
 router.post("/", authenticate, async (req: AuthenticatedRequest, res: Response) => {
   try {
     await connectDB();
     const isAdminOrManager = await isAdminOrManagerRoleName(req.user.role);
     const isCashier = isCashierRoleName(req.user.role);
-    if (!isAdminOrManager && !isCashier) {
-      return sendError(res, "Unauthorized", 403);
-    }
     const {
       orderId,
       paymentMethod,

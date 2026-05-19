@@ -1,5 +1,7 @@
 import { Request, Response, NextFunction } from "express";
 import { verifyToken } from "../lib/jwt";
+import Role from "../models/Role";
+import { connectDB } from "../lib/mongodb";
 
 export interface AuthenticatedRequest extends Request {
   user: {
@@ -8,6 +10,7 @@ export interface AuthenticatedRequest extends Request {
     role: string;
     name: string;
     email: string;
+    hasBilling?: boolean;
   };
 }
 
@@ -45,7 +48,25 @@ export function authenticate(
     email: decoded.email,
   };
 
-  next();
+  // Populate hasBilling from role
+  (async () => {
+    try {
+      await connectDB();
+      const roleDoc = await Role.findOne({ name: decoded.role }).lean<any>();
+      if (roleDoc && typeof roleDoc.hasBilling === "boolean") {
+        (req as AuthenticatedRequest).user.hasBilling = roleDoc.hasBilling;
+      } else {
+        // Fallback: cashier, admin, manager get hasBilling=true
+        const normalized = String(decoded.role).trim().toLowerCase();
+        (req as AuthenticatedRequest).user.hasBilling = ["cashier", "admin", "manager"].includes(normalized);
+      }
+    } catch (err) {
+      console.error("Failed to populate hasBilling:", err);
+      // Fallback to safe default
+      (req as AuthenticatedRequest).user.hasBilling = false;
+    }
+    next();
+  })();
 }
 
 export function requireRole(...roles: string[]) {
@@ -57,4 +78,13 @@ export function requireRole(...roles: string[]) {
     }
     next();
   };
+}
+
+export function requireBilling(req: Request, res: Response, next: NextFunction): void {
+  const user = (req as AuthenticatedRequest).user;
+  if (!user || user.hasBilling !== true) {
+    res.status(403).json({ success: false, message: "Billing permission required", error: "Billing permission required" });
+    return;
+  }
+  next();
 }

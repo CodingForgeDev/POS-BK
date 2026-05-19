@@ -38,3 +38,12 @@ export async function getRoleTypeByName(roleName: string): Promise<"admin" | "ma
   const role = await Role.findOne({ name: new RegExp(`^${escapeRegExp(roleName)}$`, "i") }).lean<RoleLean>();
   return role?.roleType || null;
 }
+
+export async function hasRoleBilling(roleName: string): Promise<boolean> {
+  const normalized = normalizeRoleName(roleName);
+  // Fallback: built-in roles that get billing by default
+  if (["cashier", "admin", "manager"].includes(normalized)) return true;
+  // Check database for custom role
+  const role = await Role.findOne({ name: new RegExp(`^${escapeRegExp(roleName)}$`, "i") }).lean<any>();
+  return role?.hasBilling === true;
+}

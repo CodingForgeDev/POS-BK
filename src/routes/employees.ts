@@ -318,6 +318,15 @@ router.patch("/:id", authenticate, async (req: AuthenticatedRequest, res: Respon
     if (Object.keys(employeePatch).length > 0) {
       Object.assign(employee, employeePatch);
       await employee.save();
+
+      // Sync isActive status to linked User record
+      if (employeePatch.isActive !== undefined && employee.user) {
+        const user = await User.findById(employee.user);
+        if (user) {
+          user.isActive = Boolean(employeePatch.isActive);
+          await user.save();
+        }
+      }
     }
 
     const populated = await Employee.findById(employee._id).populate("user", "name email phone role avatar");

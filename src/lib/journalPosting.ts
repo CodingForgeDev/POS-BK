@@ -368,40 +368,86 @@ export async function createReturnJournalEntry(returnRecord: any, session: Clien
   const reference = String(returnRecord.reference || returnRecord._id || "").trim() || `RETURN-${String(returnRecord._id)}`;
   const description = `${returnType === "purchase" ? "Purchase" : "Sale"} return ${reference}`;
 
-  const lines =
-    returnType === "sale"
-      ? [
-          {
-            account: contraAccount._id,
-            accountName: contraAccount.title,
-            debit: amount,
-            credit: 0,
-            note: `Sales return against ${reference}`,
-          },
-          {
-            account: paymentAccount._id,
-            accountName: paymentAccount.title,
-            debit: 0,
-            credit: amount,
-            note: `Sale return payment adjustment ${reference}`,
-          },
-        ]
-      : [
-          {
-            account: paymentAccount._id,
-            accountName: paymentAccount.title,
-            debit: amount,
-            credit: 0,
-            note: `Purchase return payment adjustment ${reference}`,
-          },
-          {
-            account: contraAccount._id,
-            accountName: contraAccount.title,
-            debit: 0,
-            credit: amount,
-            note: `Purchase return against ${reference}`,
-          },
-        ];
+  // For purchase returns, split GST separately
+  let lines: any[] = [];
+
+  if (returnType === "sale") {
+    lines = [
+      {
+        account: contraAccount._id,
+        accountName: contraAccount.title,
+        debit: amount,
+        credit: 0,
+        note: `Sales return against ${reference}`,
+      },
+      {
+        account: paymentAccount._id,
+        accountName: paymentAccount.title,
+        debit: 0,
+        credit: amount,
+        note: `Sale return payment adjustment ${reference}`,
+      },
+    ];
+  } else {
+    // Purchase return: Split GST using default GST rate
+    const { getGstRateForMethod } = await import("./gst");
+    const gstRatePct = await getGstRateForMethod("default");
+    
+    // Calculate GST amount: gst = totalAmount / (1 + rate/100) * (rate/100)
+    const preGstAmount = Math.round((amount / (1 + gstRatePct / 100)) * 100) / 100;
+    const gstAmount = Math.round((amount - preGstAmount) * 100) / 100;
+
+    // Resolve tax input account for GST credit
+    const taxAccount = await resolveLedgerAccountBySettingOrFallback(
+      "defaultTaxInputAccountId",
+      [
+        { type: "asset", subcategory: "tax_input" },
+        { type: "asset", subcategory: "tax-input" },
+        { type: "asset", title: /gst|tax.*input|input.*tax/i },
+        { type: "asset", title: /tax|gst|vat/i },
+      ]
+    );
+
+    // Journal lines for purchase return with GST split
+    lines = [
+      {
+        account: paymentAccount._id,
+        accountName: paymentAccount.title,
+        debit: amount,
+        credit: 0,
+        note: `Purchase return payment reduction ${reference}`,
+      },
+    ];
+
+    if (gstAmount > 0 && taxAccount) {
+      lines.push({
+        account: taxAccount._id,
+        accountName: taxAccount.title,
+        debit: gstAmount,
+        credit: 0,
+        note: `GST input reversal for ${reference}`,
+      });
+    }
+
+    lines.push({
+      account: contraAccount._id,
+      accountName: contraAccount.title,
+      debit: 0,
+      credit: preGstAmount,
+      note: `Purchase return inventory adjustment ${reference}`,
+    });
+
+    // If GST line couldn't be resolved, credit it against payable
+    if (gstAmount > 0 && !taxAccount) {
+      lines.push({
+        account: paymentAccount._id,
+        accountName: paymentAccount.title,
+        debit: 0,
+        credit: gstAmount,
+        note: `GST input reversal for ${reference}`,
+      });
+    }
+  }
 
   return createJournalEntryRecord({
     date: returnRecord.date || new Date(),
@@ -588,6 +634,12 @@ export async function createSaleReturnJournalReversal(
     throw new Error("Original journal entry is required for reversal");
   }
 
+  // Extract proportion from payload (default 1.0 = 100% for full refund)
+  const proportion = Number(payload.proportion ?? 1.0);
+  if (proportion <= 0 || proportion > 1.0) {
+    throw new Error("Proportion must be between 0 and 1.0 (0-100%)");
+  }
+
   // Validate refund method
   const validMethods = ["cash", "bank"];
   const normalizedMethod = String(refundMethod || "cash").trim().toLowerCase();
@@ -595,7 +647,7 @@ export async function createSaleReturnJournalReversal(
     throw new Error(`Invalid refund method: ${normalizedMethod}. Must be one of: ${validMethods.join(", ")}`);
   }
 
-  // Reverse all lines and handle payment account substitution
+  // Reverse all lines with proportional amounts and handle payment account substitution
   let reversalLines: any[] = [];
   let paymentLineIndex = -1;
   let paymentLineFound = false;
@@ -605,9 +657,9 @@ export async function createSaleReturnJournalReversal(
     const reversedLine = {
       account: line.account,
       accountName: line.accountName,
-      debit: Number(line.credit || 0),
-      credit: Number(line.debit || 0),
-      note: `Reversal of: ${String(line.note || line.accountName || "journal line")}`,
+      debit: Math.round(Number(line.credit || 0) * proportion * 100) / 100,
+      credit: Math.round(Number(line.debit || 0) * proportion * 100) / 100,
+      note: `${proportion < 1.0 ? `Partial refund (${(proportion * 100).toFixed(1)}%)` : "Reversal"} of: ${String(line.note || line.accountName || "journal line")}`,
     };
 
     // Try to detect if this is the payment account line (first debit line or line with cash/bank keywords)
@@ -646,7 +698,7 @@ export async function createSaleReturnJournalReversal(
     if (newPaymentAccount) {
       reversalLines[paymentLineIndex].account = newPaymentAccount._id;
       reversalLines[paymentLineIndex].accountName = newPaymentAccount.title;
-      reversalLines[paymentLineIndex].note = `Refund (${normalizedMethod}): ${reversalLines[paymentLineIndex].note}`;
+      reversalLines[paymentLineIndex].note = `Refund (${normalizedMethod}, ${(proportion * 100).toFixed(1)}%): ${reversalLines[paymentLineIndex].note}`;
     }
   }
 
@@ -655,7 +707,7 @@ export async function createSaleReturnJournalReversal(
     reference: String(payload.reference || `REV-${originalEntry.reference || originalEntry._id}`).trim(),
     description: String(
       payload.description ||
-      `Full sale return reversal (${normalizedMethod}) for ${originalEntry.reference || originalEntry._id}`
+      `${proportion < 1.0 ? `Partial (${(proportion * 100).toFixed(1)}%)` : "Full"} sale return reversal (${normalizedMethod}) for ${originalEntry.reference || originalEntry._id}`
     ).trim(),
     lines: reversalLines,
     source: "MANUAL",

@@ -494,6 +494,25 @@ router.post(
         if (updatedInvoice) {
           await reverseSaleJournalForInvoice(updatedInvoice, req.user.id, invoice.refundRequest?.refundMethod || "cash");
         }
+      } else if (newStatus === "partial") {
+        // For partial refunds, reverse journal entry proportionally
+        const updatedInvoice = await Invoice.findById(id).lean();
+        if (updatedInvoice) {
+          const refundProportion = approvedAmount / invoice.total;
+          const originalSale = (await JournalEntry.findOne({ source: "POS", sourceId: invoice.order }).lean()) as any;
+          if (originalSale) {
+            const reversalReference = `REV-${String(originalSale.reference || originalSale._id)}-PARTIAL`;
+            const existingReversal = await JournalEntry.findOne({ reference: reversalReference, source: "MANUAL" }).lean();
+            if (!existingReversal) {
+              await createSaleReturnJournalReversal(originalSale, invoice.refundRequest?.refundMethod || "cash", {
+                reference: reversalReference,
+                postedBy: req.user.id,
+                status: "posted",
+                proportion: refundProportion,
+              });
+            }
+          }
+        }
       }
 
       return sendSuccess(

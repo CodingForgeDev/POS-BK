@@ -19,6 +19,20 @@ export async function resolveLoginUser(
 
   if (!email || !password) return null;
 
+  // Check for any user with this email (to distinguish between wrong password and deactivated)
+  const anyUser = await User.findOne({ email });
+  
+  // If user exists and password matches but is inactive, throw specific error
+  if (anyUser && (await anyUser.comparePassword(password))) {
+    if (!anyUser.isActive) {
+      const error = new Error("Login deactivated. Contact your administrator");
+      (error as any).code = "ACCOUNT_DEACTIVATED";
+      throw error;
+    }
+    return anyUser;
+  }
+
+  // Check active user (for normal login flow)
   const user = await User.findOne({ email, isActive: true });
 
   if (user && (await user.comparePassword(password))) {

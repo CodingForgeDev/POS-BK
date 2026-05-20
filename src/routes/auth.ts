@@ -16,7 +16,17 @@ router.post("/login", async (req: Request, res: Response) => {
       return sendError(res, "Email and password are required", 400);
     }
 
-    const user = await resolveLoginUser(email, password);
+    let user;
+    try {
+      user = await resolveLoginUser(email, password);
+    } catch (error: any) {
+      // Handle account deactivation error
+      if (error?.code === "ACCOUNT_DEACTIVATED") {
+        return sendError(res, error.message, 403);
+      }
+      throw error;
+    }
+
     if (!user) {
       return sendError(res, "Invalid email or password", 401);
     }

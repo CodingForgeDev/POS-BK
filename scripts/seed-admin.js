@@ -37,28 +37,63 @@ async function seedAdmin() {
     await mongoose.connect(MONGODB_URI);
     console.log("✓ Connected to MongoDB");
 
-    const existing = await User.findOne({ email: "admin@poscafe.com" });
-    if (existing) {
-      console.log("⚠ Admin user already exists. Skipping.");
-      process.exit(0);
+    const admins = [
+      { name: "Admin", email: "admin@poscafe.com", password: "admin123" },
+      { name: "Codingforge Admin", email: "codingforge@codingforge.com", password: "codingforge123" },
+    ];
+
+    const hashedPassword1 = await bcrypt.hash(admins[0].password, 12);
+    const hashedPassword2 = await bcrypt.hash(admins[1].password, 12);
+
+    let createdCount = 0;
+
+    // Create first admin
+    const existing1 = await User.findOne({ email: admins[0].email });
+    if (!existing1) {
+      await User.create({
+        name: admins[0].name,
+        email: admins[0].email,
+        password: hashedPassword1,
+        role: "admin",
+        isActive: true,
+      });
+      createdCount++;
+      console.log("✅ Created: " + admins[0].email);
+    } else {
+      console.log("⚠ Already exists: " + admins[0].email);
     }
 
-    const hashedPassword = await bcrypt.hash("admin123", 12);
+    // Create codingforge admin
+    const existing2 = await User.findOne({ email: admins[1].email });
+    if (!existing2) {
+      await User.create({
+        name: admins[1].name,
+        email: admins[1].email,
+        password: hashedPassword2,
+        role: "admin",
+        isActive: true,
+      });
+      createdCount++;
+      console.log("✅ Created: " + admins[1].email);
+    } else {
+      console.log("⚠ Already exists: " + admins[1].email);
+    }
 
-    await User.create({
-      name: "Admin",
-      email: "admin@poscafe.com",
-      password: hashedPassword,
-      role: "admin",
-      isActive: true,
-    });
-
-    console.log("\n✅ Admin user created successfully!");
-    console.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-    console.log("  Email   : admin@poscafe.com");
-    console.log("  Password: admin123");
-    console.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-    console.log("\nChange the password after first login!\n");
+    if (createdCount > 0) {
+      console.log("\n✅ Admin users configured successfully!");
+      console.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+      console.log("  Email   : admin@poscafe.com");
+      console.log("  Password: admin123");
+      console.log("  Role    : Admin (Full Access)");
+      console.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+      console.log("  Email   : codingforge@codingforge.com");
+      console.log("  Password: codingforge123");
+      console.log("  Role    : Admin (Full Access)");
+      console.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+      console.log("\n⚠ Change passwords after first login!\n");
+    } else {
+      console.log("\n⚠ All admin users already exist. No changes made.\n");
+    }
 
     process.exit(0);
   } catch (err) {

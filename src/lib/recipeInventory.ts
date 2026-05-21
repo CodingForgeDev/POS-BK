@@ -72,6 +72,79 @@ export async function calculateRecipeCostPriceForRecipe(
   }, 0);
 }
 
+/**
+ * Calculate current cost prices for multiple products based on their recipes and current inventory costs.
+ * Returns a map of productId -> calculated cost price.
+ */
+export async function calculateProductsCostPrices(
+  products: Array<any>,
+  session?: ClientSession | null
+): Promise<Map<string, number>> {
+  // Collect all unique inventory item IDs from all products with recipes
+  const inventoryItemIds = new Set<string>();
+  for (const product of products) {
+    if (product.recipeLines && product.recipeLines.length > 0) {
+      for (const line of product.recipeLines) {
+        const invId = String(line.inventoryItem?._id || line.inventoryItem);
+        if (invId) inventoryItemIds.add(invId);
+      }
+    }
+  }
+
+  // Fetch all inventory costs at once
+  const inventoryQuery = Inventory.find({ _id: { $in: Array.from(inventoryItemIds) } })
+    .select("unit costPerUnit")
+    .lean();
+  if (session) inventoryQuery.session(session);
+  const inventoryDocs = await inventoryQuery;
+  
+  const inventoryMap = new Map<string, { unit?: string; costPerUnit?: number }>(
+    inventoryDocs.map((inv: any) => [
+      String(inv._id), 
+      { 
+        unit: String(inv.unit || "").toLowerCase(), 
+        costPerUnit: Number(inv.costPerUnit || 0) 
+      }
+    ])
+  );
+
+  // Calculate cost price for each product
+  const result = new Map<string, number>();
+  
+  for (const product of products) {
+    const productId = String(product._id);
+    
+    // Skip products without recipes
+    if (!product.recipeLines || product.recipeLines.length === 0) {
+      // Use stored costPrice or 0
+      result.set(productId, Number(product.costPrice || 0));
+      continue;
+    }
+
+    // Calculate cost from recipe
+    const costPrice = product.recipeLines.reduce((sum: number, line: any) => {
+      const invId = String(line.inventoryItem?._id || line.inventoryItem);
+      const inv = inventoryMap.get(invId);
+      if (!inv) return sum;
+      
+      const inventoryUnit = inv.unit || "";
+      const recipeUnit = normalizeUnit(line.unit || inventoryUnit);
+      const adjustedQuantity = convertBetweenUnits(
+        Number(line.quantityPerUnit || 0), 
+        recipeUnit, 
+        inventoryUnit
+      );
+      
+      return sum + adjustedQuantity * (inv.costPerUnit ?? 0);
+    }, 0);
+
+    result.set(productId, costPrice);
+  }
+
+  return result;
+}
+
+
 export async function recalculateProductCostPriceForInventoryItem(
   inventoryItemId: string,
   session?: ClientSession | null
@@ -121,11 +194,57 @@ export { INSUFFICIENT_STOCK, InsufficientStockError, type ShortageDetail } from 
 
 export type OrderItemLike = { product: mongoose.Types.ObjectId; quantity: number; isReadyItem?: boolean };
 
+function normalizeText(raw: unknown): string {
+  return String(raw ?? "").trim().toLowerCase();
+}
+
+function normalizeLookupKey(raw: unknown): string {
+  return normalizeText(raw)
+    .replace(/^ready-/, "")
+    .replace(/[^a-z0-9]+/g, "");
+}
+
 function normalizeProductRef(product: unknown): mongoose.Types.ObjectId {
   if (product && typeof product === "object" && (product as { _id?: unknown })._id) {
     return new mongoose.Types.ObjectId(String((product as { _id: unknown })._id));
   }
   return new mongoose.Types.ObjectId(String(product));
+}
+
+async function findReadyInventoryForProducts(
+  products: Array<{ _id: unknown; sku?: string; name?: string }>,
+  session?: ClientSession | null
+): Promise<Map<string, string>> {
+  if (!products.length) return new Map();
+
+  const readyInventoryQuery = Inventory.find({
+    isActive: true,
+    $or: [{ inventoryType: "ready" }, { isForReadyMenu: true }],
+  }).select("sku name");
+  if (session) readyInventoryQuery.session(session);
+  const readyInventories = await readyInventoryQuery.lean();
+
+  const keyMap = new Map<string, string>();
+  for (const inv of readyInventories as any[]) {
+    const skuKey = normalizeLookupKey(inv.sku);
+    if (skuKey) keyMap.set(skuKey, String(inv._id));
+    const nameKey = normalizeLookupKey(inv.name);
+    if (nameKey) keyMap.set(nameKey, String(inv._id));
+  }
+
+  const result = new Map<string, string>();
+  for (const product of products) {
+    const productId = String(product._id);
+    const skuKey = normalizeLookupKey(product.sku);
+    const nameKey = normalizeLookupKey(product.name);
+    if (skuKey && keyMap.has(skuKey)) {
+      result.set(productId, keyMap.get(skuKey)!);
+    } else if (nameKey && keyMap.has(nameKey)) {
+      result.set(productId, keyMap.get(nameKey)!);
+    }
+  }
+
+  return result;
 }
 
 async function postPOSOrderJournalEntry(
@@ -291,18 +410,22 @@ export async function aggregateRecipeRequirements(
   if (!orderItems?.length) return new Map();
 
   const normalized = orderItems
-    .filter((i) => !Boolean((i as { isReadyItem?: unknown }).isReadyItem))
     .map((i) => ({
       product: normalizeProductRef(i.product),
       quantity: Number(i.quantity) || 0,
+      isReadyItem: Boolean((i as { isReadyItem?: unknown }).isReadyItem),
     }))
     .filter((item) => item.quantity > 0);
 
   const productIds = [...new Set(normalized.map((i) => i.product.toString()))];
-  const q = Product.find({ _id: { $in: productIds } }).select("recipeLines").lean();
+  const q = Product.find({ _id: { $in: productIds } })
+    .select("recipeLines sku name isReadyItem")
+    .lean();
   if (session) q.session(session);
   const products = await q;
-  const byId = new Map(products.map((p: any) => [p._id.toString(), p]));
+  const byId = new Map(products.map((p: any) => [String(p._id), p]));
+
+  const readyInventoryMap = await findReadyInventoryForProducts(products, session);
 
   const inventoryIds = Array.from(
     new Set(
@@ -321,15 +444,25 @@ export async function aggregateRecipeRequirements(
   const totals = new Map<string, number>();
   for (const line of normalized) {
     const pid = line.product.toString();
-    const p = byId.get(pid) as {
+    const product = byId.get(pid) as {
       recipeLines?: Array<{ inventoryItem: unknown; quantityPerUnit: number; unit?: string }>;
+      isReadyItem?: boolean;
     } | undefined;
-    if (!p) {
-      // If the product no longer exists in the catalog, skip its recipe.
-      // We can still create the invoice; there is simply no inventory recipe data available.
+    const isReadyProduct = line.isReadyItem || Boolean(product?.isReadyItem);
+
+    if (isReadyProduct) {
+      const readyInventoryId = readyInventoryMap.get(pid);
+      if (readyInventoryId) {
+        totals.set(readyInventoryId, (totals.get(readyInventoryId) || 0) + line.quantity);
+        continue;
+      }
+      // If a ready product has no linked ready inventory, fall back to its raw recipe so stock usage is still recorded.
+    }
+
+    if (!product) {
       continue;
     }
-    for (const r of p.recipeLines || []) {
+    for (const r of product.recipeLines || []) {
       const qpu = Number(r.quantityPerUnit);
       if (!r.inventoryItem || !(qpu > 0)) continue;
       const invId = String(r.inventoryItem);
@@ -403,6 +536,9 @@ async function runBillingInSession(s: ClientSession | null, input: BillingRecipe
   if (s) reservationQuery.session(s);
   const activeReservation = await reservationQuery;
 
+  const orderNumberLabel = (order as any).orderNumber || order._id.toString().slice(-6);
+  const createdByOid = userId ? new mongoose.Types.ObjectId(userId) : null;
+
   if (activeReservation) {
     for (const line of (activeReservation.lines as any[]) || []) {
       const qty = Number(line.quantityReserved || 0);
@@ -413,6 +549,11 @@ async function runBillingInSession(s: ClientSession | null, input: BillingRecipe
         quantity: qty,
         session: s,
         releaseReserved: qty,
+        createTrackingLayer: {
+          sourceType: "pos",
+          actionLabel: `POS Order #${orderNumberLabel}`,
+          createdBy: createdByOid,
+        },
       });
 
       linesForLedger.push({
@@ -432,6 +573,11 @@ async function runBillingInSession(s: ClientSession | null, input: BillingRecipe
         quantity: qty,
         session: s,
         releaseReserved: 0,
+        createTrackingLayer: {
+          sourceType: "pos",
+          actionLabel: `POS Order #${orderNumberLabel}`,
+          createdBy: createdByOid,
+        },
       });
 
       linesForLedger.push({

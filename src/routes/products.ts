@@ -4,7 +4,10 @@ import { connectDB } from "../lib/mongodb";
 import { sendSuccess, sendError } from "../lib/utils";
 import { pickProductPayload } from "../lib/productPayload";
 import Product from "../models/Product";
-import { calculateRecipeCostPriceForRecipe } from "../lib/recipeInventory";
+import { 
+  calculateRecipeCostPriceForRecipe, 
+  calculateProductsCostPrices 
+} from "../lib/recipeInventory";
 import { calculateProductsAvailability } from "../lib/stockAvailability";
 
 const router: Router = Router();
@@ -30,13 +33,20 @@ router.get("/", authenticate, async (req: AuthenticatedRequest, res: Response) =
     // Calculate stock availability for all products
     const availabilityMap = await calculateProductsAvailability(products);
 
-    // Enrich products with availability data
+    // Calculate current cost prices based on recipes and inventory costs
+    const costPriceMap = await calculateProductsCostPrices(products);
+
+    // Enrich products with availability data and current cost prices
     const enrichedProducts = products.map((product: any) => {
       const availability = availabilityMap.get(String(product._id));
+      const calculatedCostPrice = costPriceMap.get(String(product._id));
+      
       return {
         ...product,
-        availableQuantity: availability?.availableQuantity ?? Infinity,
+        availableQuantity: availability?.availableQuantity ?? -1,
         stockStatus: availability?.stockStatus ?? "available",
+        // Use calculated cost price if available, otherwise use stored value
+        costPrice: calculatedCostPrice !== undefined ? calculatedCostPrice : product.costPrice,
       };
     });
 
@@ -89,7 +99,7 @@ router.get("/stock-status", authenticate, async (req: AuthenticatedRequest, res:
     }
 
     const products = await Product.find({ _id: { $in: ids }, isActive: true })
-      .select("_id isReadyItem recipeLines")
+      .select("_id isReadyItem recipeLines sku name")
       .populate("recipeLines.inventoryItem", "currentStock reservedStock unit")
       .lean();
 
@@ -118,9 +128,19 @@ router.get("/:id", authenticate, async (req: AuthenticatedRequest, res: Response
       .populate(
         "recipeLines.inventoryItem",
         "name unit currentStock minimumStock costPerUnit"
-      );
+      )
+      .lean();
     if (!product) return sendError(res, "Product not found", 404);
-    return sendSuccess(res, product);
+    
+    const productData = product as any;
+    
+    // Calculate current cost price from recipe if available
+    if (productData.recipeLines && productData.recipeLines.length > 0) {
+      const calculatedCostPrice = await calculateRecipeCostPriceForRecipe(productData.recipeLines);
+      return sendSuccess(res, { ...productData, costPrice: calculatedCostPrice });
+    }
+    
+    return sendSuccess(res, productData);
   } catch (error) {
     return sendError(res, "Failed to fetch product", 500);
   }

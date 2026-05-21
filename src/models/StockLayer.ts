@@ -4,9 +4,11 @@ const StockLayerSchema = new mongoose.Schema(
   {
     sourceType: {
       type: String,
-      enum: ["purchase", "opening", "adjustment"],
+      enum: ["purchase", "opening", "adjustment", "production", "pos"],
       required: true,
     },
+    /** Optional display text for production/POS/manual adjustment action details. */
+    actionLabel: { type: String, default: null },
     /** Set when sourceType is "purchase". */
     purchase: { type: mongoose.Schema.Types.ObjectId, ref: "Purchase", default: null },
     /** Index of line on Purchase document when sourceType is "purchase". */

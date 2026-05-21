@@ -54,6 +54,80 @@ function getValidFinishedItems(bom: any) {
   return finishedItems.filter(isValidProducedLine);
 }
 
+function normalizeText(raw: unknown): string {
+  return String(raw ?? "").trim().toLowerCase();
+}
+
+function normalizeLookupKey(raw: unknown): string {
+  return normalizeText(raw).replace(/^ready-/, "").replace(/[^a-z0-9]+/g, "");
+}
+
+function doesMenuProductMatchReadyInventory(menuProduct: any, readyInv: any): boolean {
+  const menuSku = normalizeLookupKey(menuProduct.sku);
+  const menuName = normalizeLookupKey(menuProduct.name);
+  const invSku = normalizeLookupKey(readyInv.sku);
+  const invName = normalizeLookupKey(readyInv.name);
+
+  if (menuSku && invSku && menuSku === invSku) return true;
+  if (menuName && invName && menuName === invName) return true;
+  if (menuSku && invName && menuSku === invName) return true;
+  if (menuName && invSku && menuName === invSku) return true;
+  return false;
+}
+
+async function validateReadyInventoryLinkages(
+  bom: any,
+  session: mongoose.ClientSession | null
+): Promise<void> {
+  const finishedItems = getValidFinishedItems(bom);
+  const menuProductIds = new Set<string>();
+  const readyInventoryIds = new Set<string>();
+
+  for (const item of finishedItems) {
+    const menuProductId = String(item.menuProductId || "").trim();
+    const readyInventoryId = String(item.linkedReadyInventory || item.inventoryItem || "").trim();
+    if (menuProductId) menuProductIds.add(menuProductId);
+    if (readyInventoryId) readyInventoryIds.add(readyInventoryId);
+  }
+
+  if (!menuProductIds.size || !readyInventoryIds.size) {
+    return;
+  }
+
+  const products = await Product.find({ _id: { $in: Array.from(menuProductIds) } })
+    .select("sku name")
+    .lean();
+  const inventories = await Inventory.find({
+    _id: { $in: Array.from(readyInventoryIds) },
+    isActive: true,
+  })
+    .select("sku name inventoryType isForReadyMenu")
+    .lean();
+
+  const productMap = new Map(products.map((product: any) => [String(product._id), product]));
+  const inventoryMap = new Map(inventories.map((inv: any) => [String(inv._id), inv]));
+
+  for (const item of finishedItems) {
+    const menuProductId = String(item.menuProductId || "").trim();
+    const readyInventoryId = String(item.linkedReadyInventory || item.inventoryItem || "").trim();
+    if (!menuProductId || !readyInventoryId) continue;
+
+    const menuProduct = productMap.get(menuProductId);
+    const readyInv = inventoryMap.get(readyInventoryId);
+    if (!menuProduct || !readyInv) {
+      throw new Error("Invalid menu product or ready inventory selection.");
+    }
+
+    if (readyInv.inventoryType !== "ready" && !readyInv.isForReadyMenu) {
+      throw new Error(`Selected inventory item "${readyInv.name}" is not valid ready stock for menu product "${menuProduct.name}".`);
+    }
+
+    if (!doesMenuProductMatchReadyInventory(menuProduct, readyInv)) {
+      throw new Error(`Ready inventory "${readyInv.name}" does not match menu product "${menuProduct.name}". Choose the ready stock item that matches this menu item.`);
+    }
+  }
+}
+
 function sanitizeBomPayload(payload: any) {
   const rawMaterials = getValidRawMaterials(payload.rawMaterials || []);
   const finishedItems = getValidFinishedItems(payload);
@@ -205,17 +279,30 @@ async function applyInventoryChanges(
     throw new Error("BOM transaction must contain valid raw materials and produced items.");
   }
 
+  // Calculate total production quantity (sum of all produced items)
+  const totalProducedQuantity = finishedItems.reduce((sum, item) => {
+    return sum + Number(item.quantity || 0);
+  }, 0);
+
+  if (totalProducedQuantity <= 0) {
+    throw new Error("Total produced quantity must be greater than zero.");
+  }
+
   let rawMaterialsConsumed = 0;
   let readyItemsProduced = 0;
 
+  // Deduct raw materials: raw material quantity is "per unit", multiply by total produced
   for (const raw of rawMaterials) {
-    const qty = Number(raw.quantity || 0);
-    if (!(qty > 0)) continue;
+    const perUnitQty = Number(raw.quantity || 0);
+    if (!(perUnitQty > 0)) continue;
+
+    // Total consumption = per-unit quantity × total produced quantity
+    const totalConsumption = perUnitQty * totalProducedQuantity;
 
     if (direction === 1) {
       await deductInventoryFifo({
         inventoryItemId: String(raw.inventoryItem),
-        quantity: qty,
+        quantity: totalConsumption,
         session,
         releaseReserved: 0,
       });
@@ -223,7 +310,7 @@ async function applyInventoryChanges(
       const inventoryObjectId = new mongoose.Types.ObjectId(String(raw.inventoryItem));
       const inventoryUpdate = await Inventory.findOneAndUpdate(
         { _id: inventoryObjectId, isActive: true } as any,
-        { $inc: { currentStock: qty } },
+        { $inc: { currentStock: totalConsumption } },
         { new: true, session }
       ).lean();
       if (!inventoryUpdate) {
@@ -240,8 +327,8 @@ async function applyInventoryChanges(
             createdBy: bom.postedBy || bom.createdBy || null,
             adjustmentType: "add",
             receivedAt: new Date(),
-            quantityOriginal: qty,
-            quantityRemaining: qty,
+            quantityOriginal: totalConsumption,
+            quantityRemaining: totalConsumption,
             unitCost: Number(raw.rate || 0),
           },
         ],
@@ -249,7 +336,7 @@ async function applyInventoryChanges(
       );
     }
 
-    rawMaterialsConsumed += qty;
+    rawMaterialsConsumed += totalConsumption;
   }
 
   for (const finished of finishedItems) {
@@ -290,10 +377,15 @@ async function applyInventoryChanges(
       ]);
     }
 
+    const inventoryName = (inventoryUpdate as any).name || finished.menuProductName || 'Ready Item';
+
     await StockLayer.create(
       [
         {
-          sourceType: "adjustment",
+          sourceType: direction === 1 ? "production" : "adjustment",
+          actionLabel: direction === 1 
+            ? `Produced: ${inventoryName}`
+            : `Production reversal: ${inventoryName}`,
           purchase: null,
           lineIndex: 0,
           inventoryItem: inventoryObjectId,
@@ -436,6 +528,8 @@ const runPostBOM = async (req: AuthenticatedRequest, res: Response, session: mon
   } else {
     bom.producedMenuItems = validFinishedItems;
   }
+
+  await validateReadyInventoryLinkages(bom, session);
 
   let summary;
   let inventoryApplied = false;
@@ -824,6 +918,7 @@ const runProduceNow = async (
   let readyInventoriesCreated: { menuProductId: string; inventoryId: string }[] = [];
 
   try {
+    await validateReadyInventoryLinkages(bom, session);
     // Apply inventory changes (deduct raw, add ready)
     summary = await applyInventoryChanges(bom, session, 1);
     inventoryApplied = true;

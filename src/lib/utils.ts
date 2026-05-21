@@ -104,7 +104,13 @@ export function sendError(
   data?: unknown
 ): Response {
   const body: Record<string, unknown> = { success: false, message, error: message };
-  if (data !== undefined) body.data = data;
+  if (data !== undefined) {
+    body.data = data;
+    // If data looks like shortages array, also expose it at top level for easier access
+    if (Array.isArray(data) && data.length > 0 && data[0].inventoryId) {
+      body.shortages = data;
+    }
+  }
   return res.status(status).json(body);
 }
 

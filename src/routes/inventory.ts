@@ -76,7 +76,7 @@ router.get("/adjustments", authenticate, async (req: AuthenticatedRequest, res: 
   try {
     await connectDB();
     const { inventoryItemId } = req.query as Record<string, string>;
-    const query: any = { sourceType: "adjustment" };
+    const query: any = { sourceType: { $in: ["adjustment", "production", "pos"] } };
     if (inventoryItemId) query.inventoryItem = inventoryItemId;
 
     const layers = await StockLayer.find(query)
@@ -92,6 +92,8 @@ router.get("/adjustments", authenticate, async (req: AuthenticatedRequest, res: 
       inventoryItemName: String(layer.inventoryItem?.name ?? "Unknown item"),
       supplierId: layer.supplier?._id ? String(layer.supplier._id) : undefined,
       supplierName: layer.supplier?.name || undefined,
+      sourceType: layer.sourceType,
+      actionLabel: layer.actionLabel || undefined,
       adjustmentType: layer.adjustmentType as "add" | "remove",
       status: "approved" as const,
       quantity: layer.quantityOriginal,

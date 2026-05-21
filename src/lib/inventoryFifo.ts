@@ -12,6 +12,7 @@ export type FifoAllocation = {
 /**
  * Decrements stock layers in FIFO order (receivedAt, _id), then applies matching Inventory.currentStock
  * (and optional reservedStock) decrement. Must run inside an active transaction session.
+ * Optionally creates a consumption tracking layer (e.g., for POS orders).
  */
 export async function deductInventoryFifo(opts: {
   inventoryItemId: string;
@@ -20,8 +21,14 @@ export async function deductInventoryFifo(opts: {
   /** When consuming a kitchen reservation, pass the same value as quantity so reservedStock is released. */
   releaseReserved: number;
   preferredPurchaseIds?: string[];
+  /** Create a tracking layer for this consumption (e.g., "pos" for POS orders). */
+  createTrackingLayer?: {
+    sourceType: "pos" | "production" | "adjustment";
+    actionLabel?: string;
+    createdBy?: mongoose.Types.ObjectId | null;
+  };
 }): Promise<{ allocations: FifoAllocation[] }> {
-  const { inventoryItemId, quantity, session, releaseReserved, preferredPurchaseIds } = opts;
+  const { inventoryItemId, quantity, session, releaseReserved, preferredPurchaseIds, createTrackingLayer } = opts;
   if (!(quantity > 0)) {
     return { allocations: [] };
   }
@@ -136,6 +143,31 @@ export async function deductInventoryFifo(opts: {
         available: Math.max(0, cur - res),
       },
     ]);
+  }
+
+  // Create tracking layer for consumption (e.g., POS orders)
+  if (createTrackingLayer) {
+    const avgCost = allocations.reduce((sum, a) => sum + a.quantity * a.unitCost, 0) / quantity;
+    
+    await StockLayer.create(
+      [
+        {
+          sourceType: createTrackingLayer.sourceType,
+          actionLabel: createTrackingLayer.actionLabel || undefined,
+          purchase: null,
+          lineIndex: 0,
+          inventoryItem: invId,
+          supplier: null,
+          createdBy: createTrackingLayer.createdBy || null,
+          adjustmentType: "remove",
+          receivedAt: new Date(),
+          quantityOriginal: quantity,
+          quantityRemaining: 0,
+          unitCost: avgCost || 0,
+        },
+      ],
+      session ? { session } : undefined
+    );
   }
 
   return { allocations };

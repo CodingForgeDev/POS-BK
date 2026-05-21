@@ -57,20 +57,49 @@ export type RecipeLine = {
 export type ProductWithRecipe = {
   _id: string | mongoose.Types.ObjectId;
   isReadyItem?: boolean;
+  sku?: string;
+  name?: string;
   recipeLines?: RecipeLine[];
 };
 
+function normalizeText(raw: unknown): string {
+  return String(raw ?? "").trim().toLowerCase();
+}
+
+function normalizeLookupKey(raw: unknown): string {
+  return normalizeText(raw)
+    .replace(/^ready-/, "")
+    .replace(/[^a-z0-9]+/g, "");
+}
+
+function findReadyInventoryMatch(
+  product: ProductWithRecipe,
+  inventoryMap: InventoryStockMap,
+  readyProductInventoryId?: string
+): number | null {
+  if (!readyProductInventoryId) return null;
+  const inventory = inventoryMap.get(readyProductInventoryId);
+  if (!inventory) return null;
+  return Math.max(0, inventory.currentStock - inventory.reservedStock);
+}
+
 /**
  * Calculate the maximum quantity of a product that can be made based on available inventory.
- * Returns Infinity for ready items (no recipe) or products with no recipe lines.
+ * Returns Infinity for ready items without a mapped ready inventory or products with no recipe lines.
  * For products with recipes, returns the minimum quantity that can be made across all ingredients.
  */
 export function calculateProductAvailableQuantity(
   product: ProductWithRecipe,
-  inventoryMap: InventoryStockMap
+  inventoryMap: InventoryStockMap,
+  readyInventoryId?: string
 ): number {
-  // Ready items (pre-packaged) are always available
-  if (product.isReadyItem) return Infinity;
+  if (product.isReadyItem) {
+    const readyAvailability = findReadyInventoryMatch(product, inventoryMap, readyInventoryId);
+    if (readyAvailability != null) {
+      return readyAvailability;
+    }
+    // Fall back to recipe availability when no ready inventory link exists.
+  }
 
   // Products without recipes are always available
   if (!product.recipeLines || product.recipeLines.length === 0) return Infinity;
@@ -158,6 +187,45 @@ export async function buildInventoryStockMap(
  * Calculate availability for multiple products at once.
  * Returns a map of productId -> {availableQuantity, stockStatus}
  */
+async function buildReadyInventoryMap(
+  products: Array<ProductWithRecipe | any>,
+  session?: ClientSession | null
+): Promise<Map<string, string>> {
+  const readyProducts = products.filter(
+    (product) => Boolean(product.isReadyItem) && (product.sku || product.name)
+  );
+  if (!readyProducts.length) return new Map();
+
+  const readyInventoryQuery = Inventory.find({
+    isActive: true,
+    $or: [{ inventoryType: "ready" }, { isForReadyMenu: true }],
+  }).select("sku name");
+  if (session) readyInventoryQuery.session(session);
+  const readyInventories = await readyInventoryQuery.lean();
+
+  const keyMap = new Map<string, string>();
+  for (const inv of readyInventories as any[]) {
+    const skuKey = normalizeLookupKey(inv.sku);
+    if (skuKey) keyMap.set(skuKey, String(inv._id));
+    const nameKey = normalizeLookupKey(inv.name);
+    if (nameKey) keyMap.set(nameKey, String(inv._id));
+  }
+
+  const result = new Map<string, string>();
+  for (const product of readyProducts) {
+    const productId = String(product._id);
+    const skuKey = normalizeLookupKey(product.sku);
+    const nameKey = normalizeLookupKey(product.name);
+    if (skuKey && keyMap.has(skuKey)) {
+      result.set(productId, keyMap.get(skuKey)!);
+    } else if (nameKey && keyMap.has(nameKey)) {
+      result.set(productId, keyMap.get(nameKey)!);
+    }
+  }
+
+  return result;
+}
+
 export async function calculateProductsAvailability(
   products: Array<ProductWithRecipe | any>,
   session?: ClientSession | null
@@ -173,6 +241,13 @@ export async function calculateProductsAvailability(
     }
   }
 
+  const readyInventoryMap = await buildReadyInventoryMap(products, session);
+  for (const product of products) {
+    const productId = String(product._id);
+    const readyInvId = readyInventoryMap.get(productId);
+    if (readyInvId) inventoryItemIds.add(readyInvId);
+  }
+
   // Build inventory map
   const inventoryMap = await buildInventoryStockMap(
     Array.from(inventoryItemIds),
@@ -182,10 +257,13 @@ export async function calculateProductsAvailability(
   // Calculate availability for each product
   const result = new Map<string, { availableQuantity: number; stockStatus: string }>();
   for (const product of products) {
-    const availableQuantity = calculateProductAvailableQuantity(product, inventoryMap);
-    const reportedQuantity = availableQuantity === Infinity ? Number.MAX_SAFE_INTEGER : availableQuantity;
+    const productId = String(product._id);
+    const readyInventoryId = readyInventoryMap.get(productId);
+    const availableQuantity = calculateProductAvailableQuantity(product, inventoryMap, readyInventoryId);
+    // Use -1 to represent infinite availability (products without stock tracking)
+    const reportedQuantity = availableQuantity === Infinity ? -1 : availableQuantity;
     const stockStatus = getStockStatus(availableQuantity);
-    result.set(String(product._id), { availableQuantity: reportedQuantity, stockStatus });
+    result.set(productId, { availableQuantity: reportedQuantity, stockStatus });
   }
 
   return result;

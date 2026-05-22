@@ -122,6 +122,34 @@ router.get("/", authenticate, async (req: AuthenticatedRequest, res: Response) =
   }
 });
 
+router.get("/next-reference", authenticate, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    await connectDB();
+    const now = new Date();
+    const year = now.getFullYear();
+    const month = String(now.getMonth() + 1).padStart(2, "0");
+    const day = String(now.getDate()).padStart(2, "0");
+    const prefix = `PUR-${year}${month}${day}-`;
+
+    const purchases = await Purchase.find({
+      referenceNumber: { $regex: `^${prefix}` },
+    }).select("referenceNumber").lean();
+
+    let maxSeq = 0;
+    for (const p of purchases as any[]) {
+      const suffix = String(p.referenceNumber || "").replace(prefix, "");
+      const num = parseInt(suffix, 10);
+      if (!isNaN(num) && num > maxSeq) maxSeq = num;
+    }
+
+    const nextSeq = String(maxSeq + 1).padStart(4, "0");
+    return sendSuccess(res, { referenceNumber: `${prefix}${nextSeq}` });
+  } catch (error) {
+    console.error("Next purchase reference error:", error);
+    return sendError(res, "Failed to generate reference number", 500);
+  }
+});
+
 router.get("/:id", authenticate, async (req: AuthenticatedRequest, res: Response) => {
   try {
     await connectDB();

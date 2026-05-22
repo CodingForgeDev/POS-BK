@@ -365,6 +365,34 @@ router.patch("/adjust", authenticate, async (req: AuthenticatedRequest, res: Res
   }
 });
 
+router.get("/next-reference", authenticate, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    await connectDB();
+    const now = new Date();
+    const year = now.getFullYear();
+    const month = String(now.getMonth() + 1).padStart(2, "0");
+    const day = String(now.getDate()).padStart(2, "0");
+    const prefix = `IC-${year}${month}${day}-`;
+
+    const items = await Inventory.find({
+      sku: { $regex: `^${prefix}` },
+    }).select("sku").lean();
+
+    let maxSeq = 0;
+    for (const item of items as any[]) {
+      const suffix = String(item.sku || "").replace(prefix, "");
+      const num = parseInt(suffix, 10);
+      if (!isNaN(num) && num > maxSeq) maxSeq = num;
+    }
+
+    const nextSeq = String(maxSeq + 1).padStart(4, "0");
+    return sendSuccess(res, { sku: `${prefix}${nextSeq}` });
+  } catch (error) {
+    console.error("Next inventory reference error:", error);
+    return sendError(res, "Failed to generate inventory code", 500);
+  }
+});
+
 router.get("/:id/layers", authenticate, async (req: AuthenticatedRequest, res: Response) => {
   try {
     await connectDB();

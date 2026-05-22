@@ -466,10 +466,21 @@ router.post("/", authenticate, async (req: AuthenticatedRequest, res: Response) 
 router.get("/:id", authenticate, async (req: AuthenticatedRequest, res: Response) => {
   try {
     await connectDB();
-    const order = await Order.findById(req.params.id)
-      .populate("customer", "name phone email")
-      .populate("createdBy", "name")
-      .populate("servedBy", "name");
+    let order: any | null = null;
+
+    if (mongoose.Types.ObjectId.isValid(req.params.id)) {
+      order = await Order.findById(req.params.id)
+        .populate("customer", "name phone email")
+        .populate("createdBy", "name")
+        .populate("servedBy", "name");
+    }
+
+    if (!order) {
+      order = await Order.findOne({ orderNumber: req.params.id })
+        .populate("customer", "name phone email")
+        .populate("createdBy", "name")
+        .populate("servedBy", "name");
+    }
 
     if (!order) return sendError(res, "Order not found", 404);
     return sendSuccess(res, { ...order.toObject(), status: normalizeOrderStatus(order.status) });

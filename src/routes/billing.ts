@@ -1,12 +1,12 @@
 import mongoose from "mongoose";
 import { Router, Response } from "express";
-import { authenticate, AuthenticatedRequest, requireBilling } from "../middleware/auth";
+import { authenticate, AuthenticatedRequest } from "../middleware/auth";
 import { connectDB } from "../lib/mongodb";
 import { sendSuccess, sendError, generateInvoiceNumber } from "../lib/utils";
 import Invoice from "../models/Invoice";
 import Order from "../models/Order";
 import JournalEntry from "../models/JournalEntry";
-import { isAdminOrManagerRoleName } from "../lib/role-utils";
+import { hasRoleBilling, isAdminOrManagerRoleName } from "../lib/role-utils";
 import Customer from "../models/Customer";
 import { getGstRateForMethod } from "../lib/gst";
 import { reverseJournalEntryRecord, createSaleReturnJournalReversal } from "../lib/journalPosting";
@@ -300,8 +300,10 @@ router.get("/:id", authenticate, async (req: AuthenticatedRequest, res: Response
 router.post(
   "/:id/refund-requests",
   authenticate,
-  requireBilling,
   async (req: AuthenticatedRequest, res: Response) => {
+    if (!(await hasRoleBilling(req.user.role))) {
+      return sendError(res, "Billing permission required", 403);
+    }
     try {
       await connectDB();
       const { id } = req.params;

@@ -2,6 +2,7 @@ import { Request, Response, NextFunction } from "express";
 import { verifyToken } from "../lib/jwt";
 import Role from "../models/Role";
 import { connectDB } from "../lib/mongodb";
+import { hasRoleBilling } from "../lib/role-utils";
 
 export interface AuthenticatedRequest extends Request {
   user: {
@@ -80,9 +81,9 @@ export function requireRole(...roles: string[]) {
   };
 }
 
-export function requireBilling(req: Request, res: Response, next: NextFunction): void {
+export async function requireBilling(req: Request, res: Response, next: NextFunction): Promise<void> {
   const user = (req as AuthenticatedRequest).user;
-  if (!user || user.hasBilling !== true) {
+  if (!user || !(await hasRoleBilling(user.role))) {
     res.status(403).json({ success: false, message: "Billing permission required", error: "Billing permission required" });
     return;
   }

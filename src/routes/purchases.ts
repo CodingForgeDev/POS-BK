@@ -7,6 +7,8 @@ import Purchase from "../models/Purchase";
 import StockLayer from "../models/StockLayer";
 import Inventory from "../models/Inventory";
 import Supplier from "../models/Supplier";
+import LedgerAccount from "../models/LedgerAccount";
+import JournalEntry from "../models/JournalEntry";
 import { postPurchaseInSession, type PostPurchaseLineInput } from "../lib/purchasePosting";
 import {
   createJournalEntryRecord,
@@ -72,17 +74,15 @@ router.get("/", authenticate, async (req: AuthenticatedRequest, res: Response) =
     const { supplier, supplierId, paymentStatus, from, to, page = "1", limit = "20" } = req.query as Record<string, string>;
 
     const query: Record<string, unknown> = { status: "posted" };
-    
-    // Support both 'supplier' and 'supplierId' query params
+
     if (supplier || supplierId) {
       query.supplier = supplier || supplierId;
     }
-    
-    // Filter by payment status (unpaid, partial, paid)
+
     if (paymentStatus) {
       query.paymentStatus = paymentStatus;
     }
-    
+
     if (from || to) {
       const range: Record<string, Date> = {};
       if (from) range.$gte = new Date(from);
@@ -108,8 +108,7 @@ router.get("/", authenticate, async (req: AuthenticatedRequest, res: Response) =
       .populate("lines.inventoryItem", "name unit sku")
       .select("+paidAmount +paymentStatus")
       .lean();
-    
-    // Add calculated remainingAmount field
+
     const purchasesWithRemaining = purchases.map((p: any) => ({
       ...p,
       remainingAmount: p.totalAmount - (p.paidAmount || 0),
@@ -295,6 +294,7 @@ router.patch("/:id", authenticate, async (req: AuthenticatedRequest, res: Respon
     let supplierOid: mongoose.Types.ObjectId | null = null;
     let receivedAtDate: Date | null = null;
 
+    // ── Resolve supplier ──────────────────────────────────────────────────────
     if (supplierId !== undefined) {
       if (supplierId) {
         if (!mongoose.Types.ObjectId.isValid(supplierId)) {
@@ -326,14 +326,20 @@ router.patch("/:id", authenticate, async (req: AuthenticatedRequest, res: Respon
       updateBody.notes = String(notes);
     }
 
+    // ── Normalize paymentMethod — MUST be resolved before journal block ───────
+    // Use the incoming value if provided, otherwise fall back to what's stored.
+    const resolvedPaymentMethod = paymentMethod !== undefined
+      ? String(paymentMethod).toLowerCase()
+      : String(purchaseDoc.paymentMethod || "credit").toLowerCase();
+
+    if (!["cash", "credit"].includes(resolvedPaymentMethod)) {
+      return sendError(res, "Invalid paymentMethod", 400);
+    }
     if (paymentMethod !== undefined) {
-      const normalizedPaymentMethod = String(paymentMethod || "credit").toLowerCase();
-      if (!["cash", "credit"].includes(normalizedPaymentMethod)) {
-        return sendError(res, "Invalid paymentMethod", 400);
-      }
-      updateBody.paymentMethod = normalizedPaymentMethod;
+      updateBody.paymentMethod = resolvedPaymentMethod;
     }
 
+    // ── Validate & normalise lines ────────────────────────────────────────────
     let normalizedLines: PostPurchaseLineInput[] | null = null;
     let lineUpdateMap = new Map<number, any>();
     let lineUpdates = false;
@@ -390,104 +396,207 @@ router.patch("/:id", authenticate, async (req: AuthenticatedRequest, res: Respon
         ...line,
         inventoryItem: new mongoose.Types.ObjectId(line.inventoryItem),
       }));
-      updateBody.totalAmount = normalizedLines.reduce((sum, line) => sum + line.quantity * line.unitCost, 0);
+      updateBody.totalAmount = normalizedLines.reduce(
+        (sum, line) => sum + line.quantity * line.unitCost,
+        0
+      );
       lineUpdates = true;
     }
 
+    // ── Resolve current supplier ID as plain string for account lookup ────────
+    // supplierOid is set only when the supplier is being *changed* in this request.
+    // Fall back to the stored supplier on the purchase doc.
+    const currentSupplierIdStr = supplierOid
+      ? supplierOid.toString()
+      : String(purchaseDoc.supplier || "");
+
+    // ── Execute DB writes ─────────────────────────────────────────────────────
     const session = await mongoose.startSession();
-    let updatedPurchasePayload: unknown;
+    let updatedPurchaseId: unknown;
 
-    try {
-      await session.withTransaction(async () => {
-        const updateOptions = { session };
+    const performUpdates = async (sess: ClientSession | null) => {
+      const opts = sess ? { session: sess } : {};
 
-        if (Object.keys(updateBody).length > 0) {
-          await Purchase.updateOne({ _id: purchaseDoc._id }, { $set: updateBody }, updateOptions);
+      // 1. Update the purchase document
+      if (Object.keys(updateBody).length > 0) {
+        await Purchase.updateOne({ _id: purchaseDoc._id }, { $set: updateBody }, opts);
+      }
+
+      // 2. Update stock layers & inventory quantities
+      if (lineUpdates && normalizedLines) {
+        for (let idx = 0; idx < normalizedLines.length; idx += 1) {
+          const newLine = normalizedLines[idx];
+          const oldLine = purchaseDoc.lines[idx] as any;
+          const layer = lineUpdateMap.get(idx);
+          const diff = newLine.quantity - Number(oldLine.quantity);
+
+          if (diff !== 0) {
+            await Inventory.updateOne(
+              { _id: new mongoose.Types.ObjectId(newLine.inventoryItem) },
+              { $inc: { currentStock: diff } },
+              opts
+            );
+          }
+
+          await StockLayer.updateOne(
+            { _id: layer._id },
+            {
+              $set: {
+                quantityOriginal: newLine.quantity,
+                quantityRemaining: newLine.quantity,
+                unitCost: newLine.unitCost,
+              },
+            },
+            opts
+          );
+        }
+      }
+
+      // 3. Sync supplier / date on existing stock layers
+      const layerUpdate: Record<string, unknown> = {};
+      if (supplierId !== undefined) layerUpdate.supplier = supplierOid;
+      if (receivedAtDate !== null) layerUpdate.receivedAt = receivedAtDate;
+      if (Object.keys(layerUpdate).length > 0) {
+        await StockLayer.updateMany({ purchase: purchaseDoc._id }, { $set: layerUpdate }, opts);
+      }
+
+      // 4. Update the linked journal entry so ledger balances stay in sync ─────
+      const existingJournalEntry = await JournalEntry.findOne({
+        source: "PURCHASE",
+        sourceId: purchaseDoc._id,
+      }).session(sess ?? undefined);
+
+      if (existingJournalEntry) {
+        // Resolve posting accounts using the definitive supplier string & payment method
+        const { inventoryAccount, paymentAccount } = await resolvePurchasePostingAccounts(
+          currentSupplierIdStr,
+          { paymentMethod: resolvedPaymentMethod }
+        );
+
+        if (!inventoryAccount || !paymentAccount) {
+          throw new Error(
+            `Missing ${!inventoryAccount ? "inventory" : "payment"} account mapping for purchase journal entry update.`
+          );
         }
 
-        if (lineUpdates && normalizedLines) {
-          for (let idx = 0; idx < normalizedLines.length; idx += 1) {
-            const newLine = normalizedLines[idx];
-            const oldLine = purchaseDoc.lines[idx] as any;
-            const layer = lineUpdateMap.get(idx);
-            const diff = newLine.quantity - Number(oldLine.quantity);
+        // Fetch supplier name for description
+        const currentSupplierDoc = currentSupplierIdStr
+          ? await Supplier.findById(currentSupplierIdStr).lean()
+          : null;
+        const supplierName = (currentSupplierDoc as any)?.name || "Unknown Supplier";
 
-            if (diff !== 0) {
-              await Inventory.updateOne(
-                { _id: new mongoose.Types.ObjectId(newLine.inventoryItem) },
-                { $inc: { currentStock: diff } },
-                updateOptions
-              );
-            }
+        // New total: use updated value if lines were changed, else keep existing
+        const journalAmount = Number(updateBody.totalAmount ?? purchaseDoc.totalAmount ?? 0);
 
-            await StockLayer.updateOne(
-              { _id: layer._id },
-              {
-                $set: {
-                  quantityOriginal: newLine.quantity,
-                  quantityRemaining: newLine.quantity,
-                  unitCost: newLine.unitCost,
-                },
-              },
-              updateOptions
+        const updatedJournalLines = [
+          {
+            account: inventoryAccount._id,
+            accountName: inventoryAccount.title,
+            debit: journalAmount,
+            credit: 0,
+            note: `Purchase from ${supplierName}`,
+          },
+          {
+            account: paymentAccount._id,
+            accountName: paymentAccount.title,
+            debit: 0,
+            credit: journalAmount,
+            note: `Purchase from ${supplierName}`,
+          },
+        ];
+
+        // ── Recompute running balances on affected ledger accounts ────────────
+        // Build maps: accountId → old amounts, accountId → new amounts
+        const oldLineMap = new Map<string, { debit: number; credit: number }>();
+        for (const line of existingJournalEntry.lines || []) {
+          oldLineMap.set(String(line.account), {
+            debit: Number(line.debit || 0),
+            credit: Number(line.credit || 0),
+          });
+        }
+
+        const newLineMap = new Map<string, { debit: number; credit: number }>();
+        for (const line of updatedJournalLines) {
+          newLineMap.set(String(line.account), {
+            debit: Number(line.debit || 0),
+            credit: Number(line.credit || 0),
+          });
+        }
+
+        const accountIds = new Set<string>([
+          ...Array.from(oldLineMap.keys()),
+          ...Array.from(newLineMap.keys()),
+        ]);
+
+        for (const accountId of accountIds) {
+          const oldValues = oldLineMap.get(accountId) || { debit: 0, credit: 0 };
+          const newValues = newLineMap.get(accountId) || { debit: 0, credit: 0 };
+
+          const ledgerAccount = await LedgerAccount.findById(accountId)
+            .session(sess ?? undefined)
+            .lean();
+          if (!ledgerAccount) continue;
+
+          const isNormalDebitAccount = ["asset", "bank", "receivable", "expense"].includes(
+            String((ledgerAccount as any).type || "").toLowerCase()
+          );
+
+          // Delta = change in balance impact for this account
+          const oldDelta = isNormalDebitAccount
+            ? oldValues.debit - oldValues.credit
+            : oldValues.credit - oldValues.debit;
+          const newDelta = isNormalDebitAccount
+            ? newValues.debit - newValues.credit
+            : newValues.credit - newValues.debit;
+          const delta = newDelta - oldDelta;
+
+          if (delta !== 0) {
+            await LedgerAccount.updateOne(
+              { _id: accountId },
+              { $inc: { currentBalance: delta } },
+              opts
             );
           }
         }
 
-        const layerUpdate: Record<string, unknown> = {};
-        if (supplierId !== undefined) layerUpdate.supplier = supplierOid;
-        if (receivedAtDate !== null) layerUpdate.receivedAt = receivedAtDate;
+        // ── Overwrite the journal entry document ──────────────────────────────
+        await JournalEntry.updateOne(
+          { _id: existingJournalEntry._id },
+          {
+            $set: {
+              date: receivedAtDate ?? purchaseDoc.receivedAt ?? new Date(),
+              reference: String(updateBody.referenceNumber ?? purchaseDoc.referenceNumber ?? ""),
+              description: `Purchase from ${supplierName}`,
+              lines: updatedJournalLines,
+              totalDebit: journalAmount,
+              totalCredit: journalAmount,
+              postedBy: existingJournalEntry.postedBy || req.user.id,
+              status: "posted",
+            },
+          },
+          opts
+        );
+      }
 
-        if (Object.keys(layerUpdate).length > 0) {
-          await StockLayer.updateMany({ purchase: purchaseDoc._id }, { $set: layerUpdate }, { session });
-        }
+      updatedPurchaseId = purchaseDoc._id;
+    };
 
-        updatedPurchasePayload = purchaseDoc._id;
+    // ── Try with transaction, fall back to direct writes ──────────────────────
+    try {
+      await session.withTransaction(async () => {
+        await performUpdates(session);
       });
     } catch (e: unknown) {
       const err = e as { message?: string; code?: number };
       const msg = err?.message ?? String(e);
       const code = err?.code;
-      const isTransactionUnavailable = code === 20 || /replica set/i.test(msg) || /Transaction numbers/i.test(msg);
+      const isTransactionUnavailable =
+        code === 20 || /replica set/i.test(msg) || /Transaction numbers/i.test(msg);
+
       if (isTransactionUnavailable) {
         console.warn("Transactions unavailable, falling back to non-transactional purchase update.");
         try {
-          if (Object.keys(updateBody).length > 0) {
-            await Purchase.updateOne({ _id: purchaseDoc._id }, { $set: updateBody });
-          }
-          if (lineUpdates && normalizedLines) {
-            for (let idx = 0; idx < normalizedLines.length; idx += 1) {
-              const newLine = normalizedLines[idx];
-              const oldLine = purchaseDoc.lines[idx] as any;
-              const layer = lineUpdateMap.get(idx);
-              const diff = newLine.quantity - Number(oldLine.quantity);
-
-              if (diff !== 0) {
-                await Inventory.updateOne(
-                  { _id: new mongoose.Types.ObjectId(newLine.inventoryItem) },
-                  { $inc: { currentStock: diff } }
-                );
-              }
-
-              await StockLayer.updateOne(
-                { _id: layer._id },
-                {
-                  $set: {
-                    quantityOriginal: newLine.quantity,
-                    quantityRemaining: newLine.quantity,
-                    unitCost: newLine.unitCost,
-                  },
-                }
-              );
-            }
-          }
-          const layerUpdate: Record<string, unknown> = {};
-          if (supplierId !== undefined) layerUpdate.supplier = supplierOid;
-          if (receivedAtDate !== null) layerUpdate.receivedAt = receivedAtDate;
-          if (Object.keys(layerUpdate).length > 0) {
-            await StockLayer.updateMany({ purchase: purchaseDoc._id }, { $set: layerUpdate });
-          }
-          updatedPurchasePayload = purchaseDoc._id;
+          await performUpdates(null);
         } catch (innerError: unknown) {
           console.error("Purchase update fallback error:", innerError);
           return sendError(res, "Failed to update purchase", 500);
@@ -500,7 +609,7 @@ router.patch("/:id", authenticate, async (req: AuthenticatedRequest, res: Respon
       session.endSession();
     }
 
-    const populated = await Purchase.findById(String(updatedPurchasePayload))
+    const populated = await Purchase.findById(String(updatedPurchaseId))
       .populate("supplier", "name phone")
       .populate("createdBy", "name")
       .populate("lines.inventoryItem", "name unit sku")

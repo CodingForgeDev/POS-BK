@@ -273,72 +273,79 @@ async function applyInventoryChanges(
   session: mongoose.ClientSession | null,
   direction: 1 | -1
 ) {
-  const rawMaterials = getValidRawMaterials(bom.rawMaterials || []);
+  const rawMaterials  = getValidRawMaterials(bom.rawMaterials || []);
   const finishedItems = getValidFinishedItems(bom);
   if (!rawMaterials.length || !finishedItems.length) {
     throw new Error("BOM transaction must contain valid raw materials and produced items.");
   }
 
-  // Calculate total production quantity (sum of all produced items)
-  const totalProducedQuantity = finishedItems.reduce((sum, item) => {
-    return sum + Number(item.quantity || 0);
-  }, 0);
-
+  const totalProducedQuantity = finishedItems.reduce(
+    (sum: number, item: any) => sum + Number(item.quantity || 0),
+    0
+  );
   if (totalProducedQuantity <= 0) {
     throw new Error("Total produced quantity must be greater than zero.");
   }
 
   let rawMaterialsConsumed = 0;
-  let readyItemsProduced = 0;
+  let readyItemsProduced   = 0;
+  const txNo = bom.transactionNo || "";
 
-  // Deduct raw materials: raw material quantity is "per unit", multiply by total produced
+  // ── Raw materials ───────────────────────────────────────────────────────
   for (const raw of rawMaterials) {
-    const perUnitQty = Number(raw.quantity || 0);
-    if (!(perUnitQty > 0)) continue;
-
-    // Total consumption = per-unit quantity × total produced quantity
-    const totalConsumption = perUnitQty * totalProducedQuantity;
+    const consumedQty = Number(raw.quantity || 0);
+    if (!(consumedQty > 0)) continue;
 
     if (direction === 1) {
+      // Deduct via FIFO — creates a StockLayer with sourceType "production", adjustmentType "remove"
       await deductInventoryFifo({
         inventoryItemId: String(raw.inventoryItem),
-        quantity: totalConsumption,
+        quantity:        consumedQty,
         session,
         releaseReserved: 0,
+        createTrackingLayer: {
+          sourceType:       "production",
+          adjustmentType:   "remove",
+          actionLabel:      `Consumed in production: ${raw.itemName || raw.itemCode || "raw material"}${txNo ? ` — ${txNo}` : ""}`,
+          bomTransactionNo: txNo || null,
+          createdBy:        bom.postedBy || bom.createdBy || null,
+        },
       });
     } else {
+      // Reversal: return raw material stock
       const inventoryObjectId = new mongoose.Types.ObjectId(String(raw.inventoryItem));
       const inventoryUpdate = await Inventory.findOneAndUpdate(
         { _id: inventoryObjectId, isActive: true } as any,
-        { $inc: { currentStock: totalConsumption } },
+        { $inc: { currentStock: consumedQty } },
         { new: true, session }
       ).lean();
       if (!inventoryUpdate) {
         throw new Error("Raw inventory item not found for reversal.");
       }
       await StockLayer.create(
-        [
-          {
-            sourceType: "adjustment",
-            purchase: null,
-            lineIndex: 0,
-            inventoryItem: inventoryObjectId,
-            supplier: null,
-            createdBy: bom.postedBy || bom.createdBy || null,
-            adjustmentType: "add",
-            receivedAt: new Date(),
-            quantityOriginal: totalConsumption,
-            quantityRemaining: totalConsumption,
-            unitCost: Number(raw.rate || 0),
-          },
-        ],
+        [{
+          sourceType:       "adjustment",
+          adjustmentType:   "add",
+          actionLabel:      `Production reversal (raw): ${raw.itemName || ""}${txNo ? ` — ${txNo}` : ""}`,
+          bomTransactionNo: txNo || null,
+          purchase:         null,
+          lineIndex:        0,
+          inventoryItem:    inventoryObjectId,
+          supplier:         null,
+          createdBy:        bom.postedBy || bom.createdBy || null,
+          receivedAt:       new Date(),
+          quantityOriginal: consumedQty,
+          quantityRemaining: consumedQty,
+          unitCost:         Number(raw.rate || 0),
+        }],
         session ? { session } : undefined
       );
     }
 
-    rawMaterialsConsumed += totalConsumption;
+    rawMaterialsConsumed += consumedQty;
   }
 
+  // ── Finished / ready items ──────────────────────────────────────────────────
   for (const finished of finishedItems) {
     const inventoryId = String(finished.inventoryItem || finished.linkedReadyInventory || "");
     if (!mongoose.Types.ObjectId.isValid(inventoryId)) {
@@ -351,7 +358,7 @@ async function applyInventoryChanges(
     const updateData: any = { $inc: { currentStock: direction * quantity } };
     if (direction === 1) {
       updateData.$set = {
-        costPerUnit: finished.rate || bom.costPerUnit || 0,
+        costPerUnit:   finished.rate || bom.costPerUnit || 0,
         inventoryType: "ready",
       };
     }
@@ -367,37 +374,34 @@ async function applyInventoryChanges(
     ).lean();
 
     if (!inventoryUpdate) {
-      throw new InsufficientStockError([
-        {
-          inventoryId,
-          name: finished.itemName || finished.menuProductName || "Ready inventory item",
-          required: quantity,
-          available: 0,
-        },
-      ]);
+      throw new InsufficientStockError([{
+        inventoryId,
+        name:      finished.itemName || finished.menuProductName || "Ready inventory item",
+        required:  quantity,
+        available: 0,
+      }]);
     }
 
-    const inventoryName = (inventoryUpdate as any).name || finished.menuProductName || 'Ready Item';
+    const inventoryName = (inventoryUpdate as any).name || finished.menuProductName || "Ready Item";
 
     await StockLayer.create(
-      [
-        {
-          sourceType: direction === 1 ? "production" : "adjustment",
-          actionLabel: direction === 1 
-            ? `Produced: ${inventoryName}`
-            : `Production reversal: ${inventoryName}`,
-          purchase: null,
-          lineIndex: 0,
-          inventoryItem: inventoryObjectId,
-          supplier: null,
-          createdBy: bom.postedBy || bom.createdBy || null,
-          adjustmentType: direction === 1 ? "add" : "remove",
-          receivedAt: new Date(),
-          quantityOriginal: quantity,
-          quantityRemaining: direction === 1 ? quantity : 0,
-          unitCost: finished.rate || bom.costPerUnit || 0,
-        },
-      ],
+      [{
+        sourceType:       direction === 1 ? "production" : "adjustment",
+        adjustmentType:   direction === 1 ? "add"        : "remove",
+        actionLabel:      direction === 1
+          ? `Produced: ${inventoryName}${txNo ? ` — ${txNo}` : ""}`
+          : `Production reversal (ready): ${inventoryName}${txNo ? ` — ${txNo}` : ""}`,
+        bomTransactionNo: txNo || null,
+        purchase:         null,
+        lineIndex:        0,
+        inventoryItem:    inventoryObjectId,
+        supplier:         null,
+        createdBy:        bom.postedBy || bom.createdBy || null,
+        receivedAt:       new Date(),
+        quantityOriginal: quantity,
+        quantityRemaining: direction === 1 ? quantity : 0,
+        unitCost:         finished.rate || bom.costPerUnit || 0,
+      }],
       session ? { session } : undefined
     );
 

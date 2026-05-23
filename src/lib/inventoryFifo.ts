@@ -25,6 +25,8 @@ export async function deductInventoryFifo(opts: {
   createTrackingLayer?: {
     sourceType: "pos" | "production" | "adjustment";
     actionLabel?: string;
+    adjustmentType?: "add" | "remove";
+    bomTransactionNo?: string | null;
     createdBy?: mongoose.Types.ObjectId | null;
   };
 }): Promise<{ allocations: FifoAllocation[] }> {
@@ -159,7 +161,8 @@ export async function deductInventoryFifo(opts: {
           inventoryItem: invId,
           supplier: null,
           createdBy: createTrackingLayer.createdBy || null,
-          adjustmentType: "remove",
+          adjustmentType: createTrackingLayer.adjustmentType || "remove",
+          bomTransactionNo: createTrackingLayer.bomTransactionNo || null,
           receivedAt: new Date(),
           quantityOriginal: quantity,
           quantityRemaining: 0,

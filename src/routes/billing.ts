@@ -343,11 +343,16 @@ router.post(
       }
 
       // ── Build & validate items ───────────────────────────────────────────
-      const invoiceItemMap = new Map<string, { quantity: number; price: number }>(
-        (invoice.items || []).map((i: any) => [
-          String(i.name || "").toLowerCase().trim(),
-          { quantity: Number(i.quantity), price: Number(i.price) },
-        ])
+      const invoiceItemMap = new Map<string, { quantity: number; price: number; unitTotal: number }>(
+        (invoice.items || []).map((i: any) => {
+          const quantity = Number(i.quantity) || 0;
+          const total = Number((i.total ?? i.price) || 0);
+          const unitTotal = quantity > 0 ? Math.round((total / quantity) * 100) / 100 : Number(i.price || 0);
+          return [
+            String(i.name || "").toLowerCase().trim(),
+            { quantity, price: Number(i.price), unitTotal },
+          ];
+        })
       );
 
       const validItems: Array<{
@@ -377,13 +382,15 @@ router.post(
           );
         }
 
-        const price = Number(item.price) > 0 ? Number(item.price) : original.price;
-        const refundAmount = Math.round(refundQuantity * price * 100) / 100;
+        const gstRate = Number(invoice.gstRatePct ?? invoice.taxRate ?? 0);
+        const refundBaseAmount = Math.round(refundQuantity * original.unitTotal * 100) / 100;
+        const refundTaxAmount = gstRate > 0 ? Math.round((refundBaseAmount * gstRate / 100) * 100) / 100 : 0;
+        const refundAmount = Math.round((refundBaseAmount + refundTaxAmount) * 100) / 100;
 
         validItems.push({
           name,
           quantity: refundQuantity,
-          price,
+          price: original.price,
           refundQuantity,
           refundAmount,
         });

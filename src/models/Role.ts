@@ -25,6 +25,7 @@ const RoleSchema = new mongoose.Schema(
     isDefault: { type: Boolean, default: false },
     createdBy: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
     hasBilling: { type: Boolean, default: false },
+    roleKey: { type: String, default: "" },
   },
   { timestamps: true }
 );

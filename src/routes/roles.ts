@@ -62,7 +62,7 @@ router.post("/", authenticate, async (req: AuthenticatedRequest, res: Response) 
       return sendError(res, "Unauthorized", 403);
     }
 
-    const { name, description, allowedPaths, permissions, viewStaffLogins, roleType } = req.body;
+    const { name, description, allowedPaths, permissions, viewStaffLogins, roleType, hasBilling, roleKey } = req.body;
     if (typeof name !== "string" || !name.trim()) {
       return sendError(res, "Role name is required", 400);
     }
@@ -90,6 +90,8 @@ router.post("/", authenticate, async (req: AuthenticatedRequest, res: Response) 
       roleType: normalizedRoleType ?? "staff",
       viewStaffLogins: normalizedViewStaffLogins ?? "own",
       permissions: normalizePermissions(permissions),
+      hasBilling: hasBilling !== undefined ? Boolean(hasBilling) : false,
+      roleKey: typeof roleKey === "string" && roleKey.trim() ? roleKey.trim() : trimmedName,
       createdBy: req.user.id,
     });
 
@@ -113,7 +115,7 @@ router.patch("/:id", authenticate, async (req: AuthenticatedRequest, res: Respon
     const existing = await Role.findById(id);
     if (!existing) return sendError(res, "Role not found", 404);
 
-    const { name, description, allowedPaths, permissions, isDefault, viewStaffLogins, roleType } = req.body;
+    const { name, description, allowedPaths, permissions, isDefault, viewStaffLogins, roleType, hasBilling, roleKey } = req.body;
     const patch: Record<string, unknown> = {};
 
     if (name !== undefined) {
@@ -153,6 +155,16 @@ router.patch("/:id", authenticate, async (req: AuthenticatedRequest, res: Respon
 
     if (isDefault !== undefined) {
       patch.isDefault = Boolean(isDefault);
+    }
+
+    if (hasBilling !== undefined) {
+      patch.hasBilling = Boolean(hasBilling);
+    }
+
+    if (roleKey !== undefined) {
+      if (typeof roleKey === "string" && roleKey.trim()) {
+        patch.roleKey = roleKey.trim();
+      }
     }
 
     if (Object.keys(patch).length === 0) {

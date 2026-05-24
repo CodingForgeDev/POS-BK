@@ -563,6 +563,28 @@ const runPostBOM = async (req: AuthenticatedRequest, res: Response, session: mon
   }
 };
 
+function inventoryLinesEqual(
+  aRaw: any[], bRaw: any[],
+  aProduced: any[], bProduced: any[]
+): boolean {
+  const normRaw = (items: any[]) =>
+    getValidRawMaterials(items)
+      .map((r) => ({ id: String(r.inventoryItem || ""), qty: Number(r.quantity || 0) }))
+      .sort((x, y) => x.id.localeCompare(y.id));
+  const normProduced = (items: any[]) =>
+    items.filter(isValidProducedLine)
+      .map((r) => ({ id: String(r.inventoryItem || r.linkedReadyInventory || ""), qty: Number(r.quantity || 0) }))
+      .sort((x, y) => x.id.localeCompare(y.id));
+
+  const ra = normRaw(aRaw), rb = normRaw(bRaw);
+  const pa = normProduced(aProduced), pb = normProduced(bProduced);
+  if (ra.length !== rb.length || pa.length !== pb.length) return false;
+  return (
+    ra.every((x, i) => x.id === rb[i].id && Math.abs(x.qty - rb[i].qty) < 0.001) &&
+    pa.every((x, i) => x.id === pb[i].id && Math.abs(x.qty - pb[i].qty) < 0.001)
+  );
+}
+
 const runReapplyBOM = async (req: AuthenticatedRequest, res: Response, session: mongoose.ClientSession | null) => {
   const bomQuery = BOMTransactionModel.findById(req.params.id);
   if (session) bomQuery.session(session);
@@ -575,6 +597,22 @@ const runReapplyBOM = async (req: AuthenticatedRequest, res: Response, session: 
   const originalBom = JSON.parse(JSON.stringify(bom.toObject()));
   const payload = sanitizeBomPayload(req.body);
   const allowed = ["date", "referenceNo", "remarks", "rawMaterials", "producedItems", "producedMenuItems"];
+
+  // If quantities/items are unchanged, skip the expensive reverse+reapply cycle
+  const newProduced = getValidFinishedItems(payload);
+  const oldProduced = getValidFinishedItems(bom);
+  if (inventoryLinesEqual(payload.rawMaterials || [], bom.rawMaterials || [], newProduced, oldProduced)) {
+    for (const key of ["date", "referenceNo", "remarks"] as const) {
+      if (payload[key] !== undefined) (bom as any)[key] = payload[key];
+    }
+    bom.updatedBy = new mongoose.Types.ObjectId(req.user._id);
+    if (session) {
+      await bom.save({ session });
+    } else {
+      await bom.save();
+    }
+    return sendSuccess(res, { bom, summary: { rawMaterialsConsumed: 0, readyItemsProduced: 0 } }, "BOM updated");
+  }
 
   await applyInventoryChanges(bom, session, -1);
   bom.status = "draft";

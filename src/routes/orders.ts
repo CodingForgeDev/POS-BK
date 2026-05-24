@@ -419,6 +419,7 @@ router.post("/", authenticate, async (req: AuthenticatedRequest, res: Response) 
           notes: cleanText(notes, 500),
           subtotal,
           taxAmount,
+          gstRatePct,
           discountAmount,
           serviceChargeAmount,
           total,
@@ -550,8 +551,9 @@ router.patch("/:id", authenticate, async (req: AuthenticatedRequest, res: Respon
         return sendError(res, 'At least one valid item is required', 400);
       }
       const subtotal = normalizedItems.reduce((sum, item) => sum + item.subtotal, 0);
-      const [gstRatePct, serviceChargeConfig] = await Promise.all([
-        getGstRateForMethod('default'),
+      // Use the GST rate that was stored when the order was created
+      const gstRatePct = Number(order.gstRatePct) || 16;
+      const [serviceChargeConfig] = await Promise.all([
         getOrderServiceChargeConfig(order.type),
       ]);
       const { serviceChargeAmount, taxAmount, total } = computeOrderFinancials({
@@ -733,8 +735,9 @@ router.patch("/:id/items", authenticate, async (req: AuthenticatedRequest, res: 
       return sendError(res, "At least one valid item is required", 400);
     }
     const subtotal = normalizedItems.reduce((sum, item) => sum + item.subtotal, 0);
-    const [gstRatePct, serviceChargeConfig] = await Promise.all([
-      getGstRateForMethod("default"),
+    // Use the GST rate that was stored when the order was created
+    const gstRatePct = Number(order.gstRatePct) || 16;
+    const [serviceChargeConfig] = await Promise.all([
       getOrderServiceChargeConfig(order.type),
     ]);
     const { serviceChargeAmount, taxAmount, total } = computeOrderFinancials({

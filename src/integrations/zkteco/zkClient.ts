@@ -52,6 +52,53 @@ export type ZkConnectionDiagnostics = {
   nodeZklibAppliesCommKeyOnConnect: false;
 };
 
+/**
+ * Wraps zk.createSocket() with a hard wall-clock timeout.
+ *
+ * node-zklib does NOT honour its own timeout parameter during the initial TCP connect phase —
+ * when a firewall silently drops SYN packets the socket hangs forever and createSocket()
+ * never resolves or rejects. This wrapper races the connect against a manual timer so the
+ * route always gets a response within `cfg.timeoutMs` milliseconds.
+ */
+function createSocketWithTimeout(zk: ZkLibInstance, cfg: ZkPullConfig): Promise<void> {
+  // Use connectTimeoutMs (default 8 s) for the initial TCP handshake phase only.
+  // Once connected, node-zklib applies cfg.timeoutMs to subsequent socket operations.
+  const ms = Math.max(cfg.connectTimeoutMs ?? 8_000, 3_000);
+  return new Promise<void>((resolve, reject) => {
+    let settled = false;
+
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      // Best-effort cleanup so the underlying net.Socket is released.
+      void zk.disconnect().catch(() => {});
+      reject(
+        new Error(
+          `ZK device connection timed out after ${ms}ms ` +
+          `(${cfg.deviceIp}:${cfg.devicePort}). ` +
+          `Verify the device IP is correct and that port ${cfg.devicePort} is reachable from the server ` +
+          `(check firewall / network rules).`
+        )
+      );
+    }, ms);
+
+    zk.createSocket().then(
+      () => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve();
+      },
+      (err: unknown) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        reject(err);
+      }
+    );
+  });
+}
+
 async function afterZkSocketConnected(zk: ZkLibInstance, cfg: ZkPullConfig, debug: boolean): Promise<ZkCommKeyAuthResult> {
   const tcp = zk.zklibTcp;
   const auth = await zkApplyCommKeyAfterConnect(tcp, cfg);
@@ -79,7 +126,7 @@ export async function zkTestDeviceConnection(
 > {
   const zk = new ZKLib(cfg.deviceIp, cfg.devicePort, cfg.timeoutMs, cfg.udpInPort);
   try {
-    await zk.createSocket();
+    await createSocketWithTimeout(zk, cfg);
     if (zk.connectionType !== "tcp") {
       return {
         ok: false,
@@ -117,7 +164,7 @@ export async function zkTestDeviceConnection(
  */
 export async function fetchZkDeviceUsers(cfg: ZkPullConfig): Promise<ZkDeviceUser[]> {
   const zk = new ZKLib(cfg.deviceIp, cfg.devicePort, cfg.timeoutMs, cfg.udpInPort);
-  await zk.createSocket();
+  await createSocketWithTimeout(zk, cfg);
 
   try {
     await afterZkSocketConnected(zk, cfg, cfg.debug);
@@ -146,7 +193,7 @@ export async function fetchZkAttendanceRecordBuffers(
 ): Promise<Buffer[]> {
   const debug = options?.debug ?? cfg.debug;
   const zk = new ZKLib(cfg.deviceIp, cfg.devicePort, cfg.timeoutMs, cfg.udpInPort);
-  await zk.createSocket();
+  await createSocketWithTimeout(zk, cfg);
 
   try {
     const tcp = zk.zklibTcp;

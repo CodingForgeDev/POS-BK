@@ -41,9 +41,34 @@ export async function deductInventoryFifo(opts: {
 
   const invId = new mongoose.Types.ObjectId(inventoryItemId);
 
+  // Pre-flight check: validate item and available stock BEFORE touching any stock layers.
+  // This ensures a clean rejection with no partial side-effects if stock is genuinely low.
+  // Note: we do NOT gate on isActive here — an inactive item may still have stock that
+  // needs to be consumed for an order that was already accepted.
+  {
+    let preQuery = Inventory.findById(invId).select("name currentStock reservedStock");
+    if (session) preQuery = preQuery.session(session);
+    const preCheck = await preQuery.lean() as { name?: string; currentStock?: number; reservedStock?: number } | null;
+    const cur = preCheck?.currentStock ?? 0;
+    const res = preCheck?.reservedStock ?? 0;
+    const available = Math.max(0, cur - res);
+    if (available < quantity) {
+      throw new InsufficientStockError([{
+        inventoryId: inventoryItemId,
+        name: preCheck?.name || "Unknown",
+        required: quantity,
+        available,
+      }]);
+    }
+  }
+
+  // Guard: only decrement currentStock if there is still enough stock (atomic CAS).
+  // isActive is intentionally excluded — if stock layers exist and quantity is sufficient,
+  // the deduction must complete regardless of active flag. Including isActive:true caused
+  // billing to fail with a misleading "insufficient stock" error when an item was marked
+  // inactive but still had stock layers, leaving layers decremented but currentStock un-synced.
   const inventoryGuard: Record<string, unknown> = {
     _id: invId,
-    isActive: true,
     currentStock: { $gte: quantity },
   };
   if (releaseReserved > 0) {

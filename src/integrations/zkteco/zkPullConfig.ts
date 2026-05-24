@@ -17,6 +17,15 @@ export interface ZkPullConfig {
    */
   devicePassword: string;
   intervalSeconds: number;
+  /**
+   * Hard wall-clock deadline for the initial TCP connect phase only (ms).
+   * node-zklib does not honour its own timeout during createSocket() — a firewall that silently
+   * drops SYN packets causes the socket to hang forever without this guard.
+   * Configured via ZK_CONNECT_TIMEOUT_MS (default 8000).
+   * Keep this shorter than timeoutMs so the UI gets fast feedback on unreachable devices.
+   */
+  connectTimeoutMs: number;
+  /** Timeout applied to subsequent ZK protocol operations (getUsers, readWithBuffer, etc.) in ms. */
   timeoutMs: number;
   udpInPort: number;
   debug: boolean;
@@ -41,12 +50,15 @@ export function getZkPullConfig(): ZkPullConfig {
   const commAuthTicks = Number.parseInt(process.env.ZK_COMM_AUTH_TICKS ?? "50", 10);
   const deviceTimeOffsetMinutes = Number.parseInt(process.env.ZK_DEVICE_TIME_OFFSET_MINUTES ?? "0", 10);
 
+  const connectTimeoutMs = Number.parseInt(process.env.ZK_CONNECT_TIMEOUT_MS ?? "8000", 10);
+
   return {
     enabled,
     deviceIp: (process.env.ZK_DEVICE_IP ?? "").trim(),
     devicePort: Number.parseInt(process.env.ZK_DEVICE_PORT ?? "4370", 10),
     devicePassword: process.env.ZK_DEVICE_PASSWORD ?? "",
     intervalSeconds: Number.parseInt(process.env.ZK_PULL_INTERVAL_SECONDS ?? "0", 10),
+    connectTimeoutMs: Number.isFinite(connectTimeoutMs) && connectTimeoutMs >= 1000 ? connectTimeoutMs : 8000,
     timeoutMs: Number.parseInt(process.env.ZK_PULL_TIMEOUT_MS ?? "20000", 10),
     udpInPort: Number.parseInt(process.env.ZK_PULL_UDP_IN_PORT ?? "4000", 10),
     debug: process.env.ZK_PULL_DEBUG === "1" || process.env.ZK_PULL_DEBUG === "true",

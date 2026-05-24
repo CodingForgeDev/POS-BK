@@ -273,8 +273,26 @@ async function applyInventoryChanges(
   session: mongoose.ClientSession | null,
   direction: 1 | -1
 ) {
-  const rawMaterials  = getValidRawMaterials(bom.rawMaterials || []);
-  const finishedItems = getValidFinishedItems(bom);
+  // For reversals, use a looser filter: just need a valid inventory ID and qty > 0.
+  // The strict cost/amount check in isValidProducedLine is only meaningful for forward production.
+  let rawMaterials: any[];
+  let finishedItems: any[];
+
+  if (direction === 1) {
+    rawMaterials  = getValidRawMaterials(bom.rawMaterials || []);
+    finishedItems = getValidFinishedItems(bom);
+  } else {
+    rawMaterials = (bom.rawMaterials || []).filter((r: any) => {
+      const id = String(r.inventoryItem || r.inventoryItemId || "");
+      return mongoose.Types.ObjectId.isValid(id) && Number(r.quantity || 0) > 0;
+    });
+    const allProduced = (bom.producedItems?.length ? bom.producedItems : bom.producedMenuItems) || [];
+    finishedItems = allProduced.filter((item: any) => {
+      const id = String(item.inventoryItem || item.linkedReadyInventory || "");
+      return mongoose.Types.ObjectId.isValid(id) && Number(item.quantity || 0) > 0;
+    });
+  }
+
   if (!rawMaterials.length || !finishedItems.length) {
     throw new Error("BOM transaction must contain valid raw materials and produced items.");
   }
@@ -671,6 +689,8 @@ export const reapplyBOM = async (req: AuthenticatedRequest, res: Response) => {
     try {
       await session.startTransaction();
       const result = await runReapplyBOM(req, res, session);
+      await session.commitTransaction();
+      await session.endSession();
       sessionEnded = true;
       return result;
     } catch (txnError: any) {
@@ -712,7 +732,8 @@ export const postBOM = async (req: AuthenticatedRequest, res: Response) => {
     try {
       await session.startTransaction();
       const result = await runPostBOM(req, res, session);
-      // If response already sent, mark session as ended
+      await session.commitTransaction();
+      await session.endSession();
       sessionEnded = true;
       return result;
     } catch (txnError: any) {
@@ -777,7 +798,8 @@ export const reverseBOM = async (req: AuthenticatedRequest, res: Response) => {
     try {
       await session.startTransaction();
       const result = await runReverseBOM(req, res, session);
-      // If response already sent, mark session as ended
+      await session.commitTransaction();
+      await session.endSession();
       sessionEnded = true;
       return result;
     } catch (txnError: any) {
@@ -1028,6 +1050,8 @@ export const produceNow = async (req: AuthenticatedRequest, res: Response) => {
     try {
       await session.startTransaction();
       const result = await runProduceNow(req, res, session);
+      await session.commitTransaction();
+      await session.endSession();
       sessionEnded = true;
       return result;
     } catch (txnError: any) {

@@ -2,7 +2,7 @@ import { Router, Response } from "express";
 import { authenticate, AuthenticatedRequest } from "../middleware/auth";
 import { connectDB } from "../lib/mongodb";
 import { sendSuccess, sendError } from "../lib/utils";
-import Expense from "../models/Expense";
+import Expense, { getNextExpenseNumber } from "../models/Expense";
 import Employee from "../models/Employee";
 import LedgerAccount from "../models/LedgerAccount";
 import {
@@ -11,14 +11,6 @@ import {
   resolveExpensePaymentAccount,
 } from "../lib/journalPosting";
 
-function generateExpenseReferenceNumber(): string {
-  const now = new Date();
-  const year = String(now.getFullYear());
-  const month = String(now.getMonth() + 1).padStart(2, "0");
-  const day = String(now.getDate()).padStart(2, "0");
-  const randomSegment = String(Math.floor(Math.random() * 9000) + 1000);
-  return `EXP-${year}${month}${day}-${randomSegment}`;
-}
 
 function isLegacyObjectIdReference(value: unknown): boolean {
   return typeof value === "string" && /^[a-fA-F0-9]{24}$/.test(value.trim());
@@ -27,7 +19,7 @@ function isLegacyObjectIdReference(value: unknown): boolean {
 async function ensureExpenseReference(expense: any): Promise<string> {
   const currentRef = String(expense.referenceNumber || "").trim();
   if (!currentRef || isLegacyObjectIdReference(currentRef)) {
-    const nextRef = generateExpenseReferenceNumber();
+    const nextRef = await getNextExpenseNumber();
     await Expense.findByIdAndUpdate(expense._id, { referenceNumber: nextRef });
     return nextRef;
   }
@@ -49,8 +41,12 @@ async function postExpenseJournalEntry(expense: any) {
     ? await LedgerAccount.findById(expense.paymentAccount)
     : await resolveExpensePaymentAccount(String(expense.paymentMethod || ""));
 
-  if (!expenseAccount || !paymentAccount) {
-    console.warn("Skipped expense journal entry: missing expense or payment account mapping");
+  if (!expenseAccount) {
+    console.warn("Expense account not found for expense:", expense._id);
+    return;
+  }
+  if (!paymentAccount) {
+    console.warn("Payment account not found for expense:", expense._id);
     return;
   }
 
@@ -167,13 +163,22 @@ router.post("/", authenticate, async (req: AuthenticatedRequest, res: Response) 
       req.body.employeeSalaryType = null;
     }
 
+    // Validate expense account
+    if (!req.body.expenseAccountId) {
+      return sendError(res, "Expense account is required", 400);
+    }
+
+    if (req.body.expenseAccountId) {
+      req.body.expenseAccount = req.body.expenseAccountId;
+    }
     if (req.body.paymentAccountId) {
       req.body.paymentAccount = req.body.paymentAccountId;
     }
+    delete req.body.expenseAccountId;
     delete req.body.paymentAccountId;
     delete req.body.linkedEmployeeId; // Remove if present from frontend
     const requestedRef = String(req.body.referenceNumber || "").trim();
-    const referenceNumber = requestedRef || generateExpenseReferenceNumber();
+    const referenceNumber = requestedRef || (await getNextExpenseNumber());
     const expense = await Expense.create({ ...req.body, addedBy: req.user.id, referenceNumber });
     
     // Fetch saved expense with the final referenceNumber

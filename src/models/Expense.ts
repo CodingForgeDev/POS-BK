@@ -37,6 +37,32 @@ const ExpenseSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
+// Counter schema for sequential expense reference numbers
+const ExpenseCounterSchema = new mongoose.Schema(
+  {
+    _id: { type: String, required: true },
+    seq: { type: Number, required: true, default: 0 },
+  },
+  { collection: "expense_counters" }
+);
+
+const ExpenseCounter = mongoose.models.ExpenseCounter || mongoose.model("ExpenseCounter", ExpenseCounterSchema);
+
+export async function getNextExpenseNumber(): Promise<string> {
+  const now = new Date();
+  const year = now.getFullYear();
+  const month = String(now.getMonth() + 1).padStart(2, "0");
+  const day = String(now.getDate()).padStart(2, "0");
+  const dateKey = `${year}${month}${day}`;
+  
+  const counter = (await (ExpenseCounter as mongoose.Model<any>).findOneAndUpdate(
+    { _id: `EXP-${dateKey}` },
+    { $inc: { seq: 1 } },
+    { new: true, upsert: true, setDefaultsOnInsert: true }
+  ).lean()) as any;
+  return `EXP-${dateKey}-${String(counter.seq || 1).padStart(4, "0")}`;
+}
+
 export default (mongoose.models.Expense || mongoose.model("Expense", ExpenseSchema)) as mongoose.Model<any>;
 
 

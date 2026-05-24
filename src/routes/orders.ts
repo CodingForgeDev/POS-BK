@@ -137,8 +137,11 @@ function deriveStationStatus(items: NormalizedOrderItem[] | any[], station: "kit
 function deriveGlobalOrderStatus(kitchenStatus: StationState | null, barStatus: StationState | null): string {
   const statuses = [kitchenStatus, barStatus].filter((s): s is StationState => s !== null);
   if (!statuses.length) return "accepted";
+  // All present stations must be "ready" for the order to be ready
   if (statuses.every((s) => s === "ready")) return "ready";
-  if (statuses.some((s) => s === "preparing")) return "preparing";
+  // If any station is already "ready" or "preparing", the order is still in progress
+  // (e.g. kitchen="ready" + bar="accepted" must stay "preparing", not regress to "accepted")
+  if (statuses.some((s) => s === "preparing" || s === "ready")) return "preparing";
   return "accepted";
 }
 
@@ -612,13 +615,27 @@ router.patch("/:id", authenticate, async (req: AuthenticatedRequest, res: Respon
     }
 
     const currentItems = (updates.items as any[]) ?? order.items;
-    // When items are updated, always recalculate station statuses from the new items (don't use old cached status)
-    const currentKitchenStatus = (updates.kitchenStatus as StationState) ?? 
-      (updates.items ? deriveStationStatus(currentItems, 'kitchen') : order.kitchenStatus ?? deriveStationStatus(currentItems, 'kitchen'));
-    const currentBarStatus = (updates.barStatus as StationState) ?? 
-      (updates.items ? deriveStationStatus(currentItems, 'bar') : order.barStatus ?? deriveStationStatus(currentItems, 'bar'));
-    
-    // Update station statuses in the updates object when items change
+
+    // When a station-specific update is in flight (kitchen or bar marking ready/preparing),
+    // the OTHER station's status must be preserved from the DB — not re-derived from items.
+    // Re-deriving would return "accepted" for the other station because its items don't have
+    // isReadyItem set yet, overwriting whatever progress that station already made.
+    let currentKitchenStatus: StationState | null;
+    let currentBarStatus: StationState | null;
+
+    if (station) {
+      // Station-specific update: explicitly set the target station, preserve the other.
+      currentKitchenStatus = (updates.kitchenStatus as StationState) ?? (order.kitchenStatus as StationState) ?? null;
+      currentBarStatus    = (updates.barStatus    as StationState) ?? (order.barStatus    as StationState) ?? null;
+    } else {
+      // General update (status change, item edit, etc.): recalculate both from items when they change.
+      currentKitchenStatus = (updates.kitchenStatus as StationState) ??
+        (updates.items ? deriveStationStatus(currentItems, 'kitchen') : (order.kitchenStatus as StationState) ?? deriveStationStatus(currentItems, 'kitchen'));
+      currentBarStatus = (updates.barStatus as StationState) ??
+        (updates.items ? deriveStationStatus(currentItems, 'bar') : (order.barStatus as StationState) ?? deriveStationStatus(currentItems, 'bar'));
+    }
+
+    // Persist recalculated station statuses when items change
     if (updates.items) {
       if (currentKitchenStatus) updates.kitchenStatus = currentKitchenStatus;
       if (currentBarStatus) updates.barStatus = currentBarStatus;

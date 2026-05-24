@@ -688,11 +688,24 @@ router.post("/", authenticate, async (req: AuthenticatedRequest, res: Response) 
     }
 
     const gstRatePct = await getGstRateForMethod(paymentMethodValue);
-    const { discountAmount, serviceChargeAmount, taxAmount, total } = invoiceTotalsFromOrder(
+    const { discountAmount: orderDiscountAmount, serviceChargeAmount, taxAmount, total: orderTotal } = invoiceTotalsFromOrder(
       order,
       gstRatePct,
       paymentAccountDiscountAmountValue
     );
+
+    // Compute the dialog-selected discount amount (on top of any POS order discount)
+    let dialogDiscountAmount = 0;
+    if (discountTypeValue !== "none" && discountValueNumber > 0) {
+      const afterOrderDiscount = Math.max(0, Number(order.subtotal || 0) - orderDiscountAmount);
+      if (discountTypeValue === "percentage") {
+        dialogDiscountAmount = Math.round((afterOrderDiscount * discountValueNumber) / 100);
+      } else if (discountTypeValue === "fixed") {
+        dialogDiscountAmount = Math.min(discountValueNumber, afterOrderDiscount);
+      }
+    }
+    const discountAmount = orderDiscountAmount + dialogDiscountAmount;
+    const total = Math.max(0, orderTotal - dialogDiscountAmount);
 
     const billingBase = {
       orderId: normalizedOrderId,

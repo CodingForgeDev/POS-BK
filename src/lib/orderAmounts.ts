@@ -1,6 +1,7 @@
 /**
- * Single place for order subtotal → discount → dine-in service charge → GST → total.
- * GST applies to subtotal after discount only; service charge is added separately.
+ * Single place for order subtotal → discount → service charge → GST → total.
+ * Service charge applies to dine-in, takeaway-service, and delivery order types.
+ * GST applies to subtotal after discount only; service charge is added separately (not taxed).
  */
 
 export type DiscountInput = { type: string; value: number } | null | undefined;
@@ -46,7 +47,7 @@ export function computeOrderFinancials(input: OrderFinancialsInput) {
     };
 
   const serviceChargeAmount =
-    (input.orderType === "dine-in" || input.orderType === "takeaway-service") && config.value > 0
+    (input.orderType === "dine-in" || input.orderType === "takeaway-service" || input.orderType === "delivery") && config.value > 0
       ? config.type === "percentage"
         ? (afterDiscount * config.value) / 100
         : Math.max(0, config.value)

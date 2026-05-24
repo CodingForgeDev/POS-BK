@@ -28,6 +28,8 @@ const OrderItemSchema = new mongoose.Schema(
     station: { type: String, enum: ["kitchen", "bar"], default: "kitchen" },
     /** When true, item was added to an existing ready order — kitchen should prepare only these. */
     isAddOn: { type: Boolean, default: false },
+    /** When true, item has already been served to the customer — cannot be modified or removed. */
+    served: { type: Boolean, default: false },
   },
   { _id: false }
 );

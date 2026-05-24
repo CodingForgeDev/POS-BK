@@ -32,6 +32,7 @@ type NormalizedOrderItem = {
   isReadyItem: boolean;
   station: "kitchen" | "bar";
   isAddOn: boolean;
+  served: boolean;
   modifiers: NormalizedModifier[];
   subtotal: number;
 };
@@ -176,6 +177,7 @@ function sanitizeOrderItems(rawItems: unknown): NormalizedOrderItem[] {
         isReadyItem: Boolean((item as { isReadyItem?: unknown }).isReadyItem),
         station: sanitizeStation((item as { station?: unknown }).station),
         isAddOn: Boolean((item as { isAddOn?: unknown }).isAddOn),
+        served: Boolean((item as { served?: unknown }).served),
         modifiers,
         subtotal: computeLineSubtotal(price, quantity, modifiers),
       } as NormalizedOrderItem;
@@ -366,12 +368,13 @@ router.post("/", authenticate, async (req: AuthenticatedRequest, res: Response) 
         : "accepted"
       : null;
     const requestedStatus = normalizeOrderStatus(status);
-    const orderStatus =
-      requestedStatus && ["created", "sent", "accepted", "rejected", "preparing", "ready", "served"].includes(requestedStatus)
+    // Prioritize allReady: if all items are ready items, set status to "ready" immediately
+    // regardless of requested status (ready items don't need kitchen prep)
+    const orderStatus = allReady
+      ? "ready"
+      : requestedStatus && ["created", "sent", "accepted", "rejected", "preparing", "ready", "served"].includes(requestedStatus)
         ? requestedStatus
-        : allReady
-          ? "ready"
-          : "created";
+        : "created";
 
     const validCustomerId = typeof customerId === "string" && mongoose.isValidObjectId(customerId) ? customerId : null;
     const phoneValue = typeof customerPhone === "string" ? customerPhone.trim() : "";
@@ -609,8 +612,18 @@ router.patch("/:id", authenticate, async (req: AuthenticatedRequest, res: Respon
     }
 
     const currentItems = (updates.items as any[]) ?? order.items;
-    const currentKitchenStatus = (updates.kitchenStatus as StationState) ?? order.kitchenStatus ?? deriveStationStatus(currentItems, 'kitchen');
-    const currentBarStatus = (updates.barStatus as StationState) ?? order.barStatus ?? deriveStationStatus(currentItems, 'bar');
+    // When items are updated, always recalculate station statuses from the new items (don't use old cached status)
+    const currentKitchenStatus = (updates.kitchenStatus as StationState) ?? 
+      (updates.items ? deriveStationStatus(currentItems, 'kitchen') : order.kitchenStatus ?? deriveStationStatus(currentItems, 'kitchen'));
+    const currentBarStatus = (updates.barStatus as StationState) ?? 
+      (updates.items ? deriveStationStatus(currentItems, 'bar') : order.barStatus ?? deriveStationStatus(currentItems, 'bar'));
+    
+    // Update station statuses in the updates object when items change
+    if (updates.items) {
+      if (currentKitchenStatus) updates.kitchenStatus = currentKitchenStatus;
+      if (currentBarStatus) updates.barStatus = currentBarStatus;
+    }
+    
     const derivedStatus = deriveGlobalOrderStatus(currentKitchenStatus, currentBarStatus);
     if (!updates.status && !['rejected', 'cancelled', 'completed', 'closed'].includes(currentStatus)) {
       updates.status = derivedStatus;
@@ -627,6 +640,12 @@ router.patch("/:id", authenticate, async (req: AuthenticatedRequest, res: Respon
       if (normalizedTo === "served") {
         updates.servedBy = req.user.id;
         updates.servedAt = updates.servedAt ?? new Date();
+        // Mark all current items as served so they are locked for further edits
+        const itemsToMark = (updates.items as any[]) ?? (order.items as any[]);
+        updates.items = itemsToMark.map((item: any) => ({
+          ...(typeof item.toObject === "function" ? item.toObject() : item),
+          served: true,
+        }));
       }
     } else {
       updates.updatedBy = req.user.id;

@@ -78,6 +78,8 @@ const InvoiceSchema = new mongoose.Schema(
     },
     discountValue: { type: Number, default: 0 },
     discountAmount: { type: Number, default: 0 },
+    discountCode: { type: String, default: "" },
+    discountName: { type: String, default: "" },
     serviceChargeAmount: { type: Number, default: 0 },
     total: { type: Number, required: true },
     paymentMethod: {

@@ -314,12 +314,16 @@ async function postPOSOrderJournalEntry(
   ];
 
   if (discountAmount > 0) {
+    const discountName = invoice.discountName || "";
+    const discountCode = invoice.discountCode || "";
+    const namePart = discountName ? ` (${discountName}${discountCode ? ` - ${discountCode}` : ""})` : "";
+
     lines.push({
       account: discountAccount?._id || revenueAccount._id,
       accountName: discountAccount?.title || revenueAccount.title,
       debit: discountAmount,
       credit: 0,
-      note: `Order discount for ${order.orderNumber}`,
+      note: `Order discount${namePart} for ${order.orderNumber}`,
     });
   }
 
@@ -482,6 +486,8 @@ export type BillingRecipeInput = {
   amountPaid: number;
   discountType?: string;
   discountValue?: number;
+  discountCode?: string;
+  discountName?: string;
   notes?: string;
   paymentAccountName?: string;
   paymentAccountDiscountType?: string;
@@ -503,6 +509,8 @@ async function runBillingInSession(s: ClientSession | null, input: BillingRecipe
     amountPaid,
     discountType,
     discountValue,
+    discountCode,
+    discountName,
     notes,
     paymentAccountName,
     paymentAccountDiscountType,
@@ -612,6 +620,8 @@ async function runBillingInSession(s: ClientSession | null, input: BillingRecipe
         discountType: discountType || "none",
         discountValue: discountValue || 0,
         discountAmount,
+        discountCode: discountCode || "",
+        discountName: discountName || "",
         serviceChargeAmount,
         paymentAccountName: String(paymentAccountName ?? ""),
         paymentAccountDiscountType: paymentAccountDiscountType || "none",

@@ -653,6 +653,8 @@ router.post("/", authenticate, async (req: AuthenticatedRequest, res: Response) 
       paymentAccountDiscountType,
       paymentAccountDiscountValue,
       paymentAccountDiscountAmount,
+      discountCode,
+      discountName,
     } = req.body;
 
     const normalizedOrderId = String(orderId ?? "").trim();
@@ -717,6 +719,8 @@ router.post("/", authenticate, async (req: AuthenticatedRequest, res: Response) 
       amountPaid: amountPaidValue,
       discountType: discountTypeValue,
       discountValue: Number.isFinite(discountValueNumber) ? discountValueNumber : 0,
+      discountCode: String(discountCode ?? ""),
+      discountName: String(discountName ?? ""),
       notes: String(notes ?? ""),
       paymentAccountName: String(paymentAccountName ?? ""),
       paymentAccountDiscountType: paymentAccountDiscountTypeValue,

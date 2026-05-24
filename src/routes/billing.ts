@@ -683,8 +683,11 @@ router.post("/", authenticate, async (req: AuthenticatedRequest, res: Response) 
     const normalizedOrderStatus = String(order.status || "").toLowerCase() === "completed" ? "closed" : String(order.status || "").toLowerCase();
     if (normalizedOrderStatus === "closed") return sendError(res, "Order already billed", 400);
     if (["cancelled", "rejected"].includes(normalizedOrderStatus)) return sendError(res, "Cancelled or rejected orders cannot be billed", 400);
-    if (!["served", "ready"].includes(normalizedOrderStatus) && !isAdminOrManager) {
-      return sendError(res, "Only served orders can be closed by cashier", 400);
+    if (!isAdminOrManager && normalizedOrderStatus !== "served") {
+      return sendError(res, "Order must be marked as served before billing", 400);
+    }
+    if (isAdminOrManager && !["served", "ready", "accepted", "preparing"].includes(normalizedOrderStatus)) {
+      return sendError(res, "Order cannot be billed in its current status", 400);
     }
 
     const gstRatePct = await getGstRateForMethod(paymentMethodValue);

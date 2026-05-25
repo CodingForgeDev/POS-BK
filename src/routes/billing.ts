@@ -351,16 +351,21 @@ router.post(
       }
 
       // ── Build & validate items ───────────────────────────────────────────
-      const invoiceItemMap = new Map<string, { quantity: number; price: number; unitTotal: number }>(
-        (invoice.items || []).map((i: any) => {
-          const quantity = Number(i.quantity) || 0;
-          const total = Number((i.total ?? i.price) || 0);
-          const unitTotal = quantity > 0 ? Math.round((total / quantity) * 100) / 100 : Number(i.price || 0);
-          return [
-            String(i.name || "").toLowerCase().trim(),
-            { quantity, price: Number(i.price), unitTotal },
-          ];
-        })
+      // Proportional formula: each item's refund amount = its share of the
+      // invoice total (which already includes all discounts, service charge,
+      // and GST). This avoids double-counting tax and correctly distributes
+      // any discounts that were applied at the invoice level.
+      const invoiceSubtotal = Number(invoice.subtotal || 0);
+      const invoiceTotal = Number(invoice.total || 0);
+      // rate > 1 when subtotal > 0 (normal case). Falls back to 1 so refund
+      // = raw price × qty on legacy invoices missing subtotal.
+      const proportionalRate = invoiceSubtotal > 0 ? invoiceTotal / invoiceSubtotal : 1;
+
+      const invoiceItemMap = new Map<string, { quantity: number; price: number }>(
+        (invoice.items || []).map((i: any) => [
+          String(i.name || "").toLowerCase().trim(),
+          { quantity: Number(i.quantity) || 0, price: Number(i.price || 0) },
+        ])
       );
 
       const validItems: Array<{
@@ -390,10 +395,9 @@ router.post(
           );
         }
 
-        const gstRate = Number(invoice.gstRatePct ?? invoice.taxRate ?? 0);
-        const refundBaseAmount = Math.round(refundQuantity * original.unitTotal * 100) / 100;
-        const refundTaxAmount = gstRate > 0 ? Math.round((refundBaseAmount * gstRate / 100) * 100) / 100 : 0;
-        const refundAmount = Math.round((refundBaseAmount + refundTaxAmount) * 100) / 100;
+        // Proportional refund: distributes discount + service charge + tax
+        // exactly as they were applied on the original invoice.
+        const refundAmount = Math.round(refundQuantity * original.price * proportionalRate * 100) / 100;
 
         validItems.push({
           name,

@@ -53,30 +53,38 @@ function sanitizeInvoice(invoice: any) {
   return invoice;
 }
 
+/**
+ * Compute invoice totals from an existing order at billing time.
+ *
+ * Key design decisions:
+ *  - We always recompute from order.subtotal rather than re-using order.total.
+ *    This ensures the correct payment-method GST rate is applied (e.g. card 5% vs cash 16%),
+ *    and that all discounts (POS + dialog + bank) are subtracted BEFORE GST is computed.
+ *  - GST is exclusive: tax = afterAllDiscounts * rate / 100.
+ *  - Service charge is kept from the order as-is (agreed at order creation time).
+ *  - Total = afterAllDiscounts + serviceCharge + taxAmount.
+ */
 function invoiceTotalsFromOrder(
   order: any,
   gstRatePct: number,
+  dialogDiscountAmount = 0,
   paymentAccountDiscountAmount = 0
 ) {
-  const discountAmount = order.discountAmount || 0;
+  const subtotal = Number(order.subtotal || 0);
+  const orderDiscountAmount = Number(order.discountAmount || 0);
   const serviceChargeAmount = Number(order.serviceChargeAmount) || 0;
-  const existingTaxAmount = Number(order.taxAmount) || 0;
-  const existingTotal = Number(order.total) || 0;
 
-  if (Number.isFinite(existingTotal) && existingTotal > 0) {
-    const total = Math.max(0, existingTotal - Math.max(0, paymentAccountDiscountAmount));
-    return { discountAmount, serviceChargeAmount, taxAmount: existingTaxAmount, total };
-  }
+  // Apply discounts in order: POS order discount → dialog discount → bank/payment-account discount
+  const afterPosDiscount = Math.max(0, subtotal - orderDiscountAmount);
+  const afterDialogDiscount = Math.max(0, afterPosDiscount - Math.max(0, dialogDiscountAmount));
+  const afterAllDiscounts = Math.max(0, afterDialogDiscount - Math.max(0, paymentAccountDiscountAmount));
 
-  const afterDiscount = Math.max(0, order.subtotal - discountAmount);
-  const taxableBase = Math.max(
-    0,
-    afterDiscount - Math.max(0, paymentAccountDiscountAmount)
-  );
+  // GST at the billing-time payment-method rate, applied to fully discounted amount
   const rate = Math.max(0, Math.min(100, gstRatePct));
-  const taxAmount = (taxableBase * rate) / 100;
-  const total = taxableBase + serviceChargeAmount + taxAmount;
-  return { discountAmount, serviceChargeAmount, taxAmount, total };
+  const taxAmount = (afterAllDiscounts * rate) / 100;
+  const total = afterAllDiscounts + serviceChargeAmount + taxAmount;
+
+  return { discountAmount: orderDiscountAmount, serviceChargeAmount, taxAmount, total };
 }
 
 const FULL_POPULATE = [
@@ -693,24 +701,31 @@ router.post("/", authenticate, async (req: AuthenticatedRequest, res: Response) 
     }
 
     const gstRatePct = await getGstRateForMethod(paymentMethodValue);
-    const { discountAmount: orderDiscountAmount, serviceChargeAmount, taxAmount, total: orderTotal } = invoiceTotalsFromOrder(
-      order,
-      gstRatePct,
-      paymentAccountDiscountAmountValue
-    );
 
-    // Compute the dialog-selected discount amount (on top of any POS order discount)
+    // Step 1: Compute dialog discount on the after-POS-discount base (must happen before
+    // invoiceTotalsFromOrder so GST is calculated on the fully discounted amount).
+    const orderSubtotal = Number(order.subtotal || 0);
+    const orderPosDiscount = Number(order.discountAmount || 0);
+    const afterOrderDiscount = Math.max(0, orderSubtotal - orderPosDiscount);
+
     let dialogDiscountAmount = 0;
     if (discountTypeValue !== "none" && discountValueNumber > 0) {
-      const afterOrderDiscount = Math.max(0, Number(order.subtotal || 0) - orderDiscountAmount);
       if (discountTypeValue === "percentage") {
         dialogDiscountAmount = Math.round((afterOrderDiscount * discountValueNumber) / 100);
       } else if (discountTypeValue === "fixed") {
         dialogDiscountAmount = Math.min(discountValueNumber, afterOrderDiscount);
       }
     }
+
+    // Step 2: Compute final totals — GST uses billing-time payment-method rate and is applied
+    // AFTER all discounts (POS + dialog + bank) have been deducted.
+    const { discountAmount: orderDiscountAmount, serviceChargeAmount, taxAmount, total } = invoiceTotalsFromOrder(
+      order,
+      gstRatePct,
+      dialogDiscountAmount,
+      paymentAccountDiscountAmountValue
+    );
     const discountAmount = orderDiscountAmount + dialogDiscountAmount;
-    const total = Math.max(0, orderTotal - dialogDiscountAmount);
 
     const billingBase = {
       orderId: normalizedOrderId,

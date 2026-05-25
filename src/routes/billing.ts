@@ -201,10 +201,16 @@ router.get("/", authenticate, async (req: AuthenticatedRequest, res: Response) =
 });
 
 // GET /billing/refund-requests
+// Admin / Manager → see all requests.
+// Cashier (hasBilling) → see only requests they personally submitted.
 router.get("/refund-requests", authenticate, async (req: AuthenticatedRequest, res: Response) => {
   try {
     await connectDB();
-    if (!(await isAdminOrManagerRoleName(req.user.role))) {
+    const isAdminOrManager = await isAdminOrManagerRoleName(req.user.role);
+    const isCashier = isCashierRoleName(req.user.role);
+
+    // Only admin, manager, and cashier can access this endpoint
+    if (!isAdminOrManager && !isCashier) {
       return sendError(res, "Unauthorized", 403);
     }
 
@@ -213,6 +219,11 @@ router.get("/refund-requests", authenticate, async (req: AuthenticatedRequest, r
     const normalizedStatus = allowedStatuses.includes(status) ? status : "pending";
 
     const query: any = { "refundRequest.requestedBy": { $ne: null } };
+
+    // Cashiers only see their own requests
+    if (!isAdminOrManager) {
+      query["refundRequest.requestedBy"] = req.user.id;
+    }
     if (normalizedStatus !== "all") {
       query["refundRequest.status"] = normalizedStatus;
     }

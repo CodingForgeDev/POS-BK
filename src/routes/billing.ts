@@ -676,10 +676,8 @@ router.post("/", authenticate, async (req: AuthenticatedRequest, res: Response) 
       return sendError(res, "Amount paid must be a valid non-negative number", 400);
     }
 
-    const discountTypeValue = ["percentage", "fixed", "none"].includes(String(discountType ?? ""))
-      ? String(discountType)
-      : "none";
-    const discountValueNumber = Number(discountValue ?? 0);
+    const requestDiscountType = String(discountType ?? "").trim().toLowerCase();
+    const requestDiscountValue = Number(discountValue ?? NaN);
     const paymentAccountDiscountTypeValue = ["percentage", "fixed", "none"].includes(
       String(paymentAccountDiscountType ?? "")
     )
@@ -690,6 +688,18 @@ router.post("/", authenticate, async (req: AuthenticatedRequest, res: Response) 
 
     const order = await Order.findById(normalizedOrderId);
     if (!order) return sendError(res, "Order not found", 404);
+
+    const orderDiscountType = String(order.discountType ?? "").trim().toLowerCase();
+    const orderDiscountValue = Number(order.discountValue ?? 0);
+    const hasRequestDiscount = (requestDiscountType === "percentage" || requestDiscountType === "fixed") && Number.isFinite(requestDiscountValue) && requestDiscountValue > 0;
+    const dialogDiscountTypeValue = hasRequestDiscount ? requestDiscountType : "none";
+    const dialogDiscountValueNumber = hasRequestDiscount ? requestDiscountValue : 0;
+    const invoiceDiscountTypeValue = hasRequestDiscount
+      ? requestDiscountType
+      : (orderDiscountType === "percentage" || orderDiscountType === "fixed" ? orderDiscountType : "none");
+    const invoiceDiscountValueNumber = hasRequestDiscount
+      ? requestDiscountValue
+      : (Number.isFinite(orderDiscountValue) ? orderDiscountValue : 0);
     const normalizedOrderStatus = String(order.status || "").toLowerCase() === "completed" ? "closed" : String(order.status || "").toLowerCase();
     if (normalizedOrderStatus === "closed") return sendError(res, "Order already billed", 400);
     if (["cancelled", "rejected"].includes(normalizedOrderStatus)) return sendError(res, "Cancelled or rejected orders cannot be billed", 400);
@@ -709,11 +719,11 @@ router.post("/", authenticate, async (req: AuthenticatedRequest, res: Response) 
     const afterOrderDiscount = Math.max(0, orderSubtotal - orderPosDiscount);
 
     let dialogDiscountAmount = 0;
-    if (discountTypeValue !== "none" && discountValueNumber > 0) {
-      if (discountTypeValue === "percentage") {
-        dialogDiscountAmount = Math.round((afterOrderDiscount * discountValueNumber) / 100);
-      } else if (discountTypeValue === "fixed") {
-        dialogDiscountAmount = Math.min(discountValueNumber, afterOrderDiscount);
+    if (dialogDiscountTypeValue !== "none" && dialogDiscountValueNumber > 0) {
+      if (dialogDiscountTypeValue === "percentage") {
+        dialogDiscountAmount = Math.round((afterOrderDiscount * dialogDiscountValueNumber) / 100);
+      } else if (dialogDiscountTypeValue === "fixed") {
+        dialogDiscountAmount = Math.min(dialogDiscountValueNumber, afterOrderDiscount);
       }
     }
 
@@ -727,15 +737,20 @@ router.post("/", authenticate, async (req: AuthenticatedRequest, res: Response) 
     );
     const discountAmount = orderDiscountAmount + dialogDiscountAmount;
 
+    const billingDiscountCode = typeof discountCode === "string" ? discountCode.trim() : "";
+    const billingDiscountName = typeof discountName === "string" ? discountName.trim() : "";
+    const finalDiscountCode = billingDiscountCode || String(order.discountCode ?? "").trim();
+    const finalDiscountName = billingDiscountName || String(order.discountName ?? "").trim();
+
     const billingBase = {
       orderId: normalizedOrderId,
       userId: req.user.id,
       paymentMethod: paymentMethodValue,
       amountPaid: amountPaidValue,
-      discountType: discountTypeValue,
-      discountValue: Number.isFinite(discountValueNumber) ? discountValueNumber : 0,
-      discountCode: String(discountCode ?? ""),
-      discountName: String(discountName ?? ""),
+      discountType: invoiceDiscountTypeValue,
+      discountValue: Number.isFinite(invoiceDiscountValueNumber) ? invoiceDiscountValueNumber : 0,
+      discountCode: finalDiscountCode,
+      discountName: finalDiscountName,
       notes: String(notes ?? ""),
       paymentAccountName: String(paymentAccountName ?? ""),
       paymentAccountDiscountType: paymentAccountDiscountTypeValue,

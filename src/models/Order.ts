@@ -55,6 +55,14 @@ const OrderSchema = new mongoose.Schema(
     taxAmount: { type: Number, default: 0 },
     /** GST rate percentage used for tax calculation (e.g., 16 for cash, 5 for card) */
     gstRatePct: { type: Number, default: 16 },
+    discountType: {
+      type: String,
+      enum: ["percentage", "fixed", "none"],
+      default: "none",
+    },
+    discountValue: { type: Number, default: 0 },
+    discountCode: { type: String, default: "" },
+    discountName: { type: String, default: "" },
     discountAmount: { type: Number, default: 0 },
     /** Dine-in only; % from settings applied to (subtotal − discount). Takeaway/delivery: 0. */
     serviceChargeAmount: { type: Number, default: 0 },

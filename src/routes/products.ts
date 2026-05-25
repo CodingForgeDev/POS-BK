@@ -149,9 +149,6 @@ router.get("/:id", authenticate, async (req: AuthenticatedRequest, res: Response
 router.patch("/:id", authenticate, async (req: AuthenticatedRequest, res: Response) => {
   try {
     await connectDB();
-    if (!["admin", "manager"].includes(req.user.role)) {
-      return sendError(res, "Unauthorized", 403);
-    }
     let update: Record<string, unknown>;
     try {
       update = pickProductPayload(req.body as Record<string, unknown>);
@@ -159,6 +156,16 @@ router.patch("/:id", authenticate, async (req: AuthenticatedRequest, res: Respon
       const msg = e instanceof Error ? e.message : "Invalid payload";
       return sendError(res, msg, 400);
     }
+
+    const isToggleOnly =
+      req.user.role === "cashier" &&
+      Object.keys(update).length === 1 &&
+      Object.prototype.hasOwnProperty.call(update, "isAvailable");
+
+    if (!["admin", "manager"].includes(req.user.role) && !isToggleOnly) {
+      return sendError(res, "Unauthorized", 403);
+    }
+
     if (Array.isArray(update.recipeLines) && update.recipeLines.length > 0) {
       update.costPrice = await calculateRecipeCostPriceForRecipe(update.recipeLines as any[]);
     }

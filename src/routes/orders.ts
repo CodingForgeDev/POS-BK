@@ -159,6 +159,28 @@ function resolveStationStatus(
   return newStatus;
 }
 
+type NormalizedOrderDiscount = {
+  type: "percentage" | "fixed" | "none";
+  value: number;
+  code: string;
+  name: string;
+};
+
+function sanitizeOrderDiscount(raw: unknown): NormalizedOrderDiscount {
+  if (!raw || typeof raw !== "object") {
+    return { type: "none", value: 0, code: "", name: "" };
+  }
+  const rawType = String((raw as any).type ?? "").trim().toLowerCase();
+  const type = rawType === "percentage" || rawType === "fixed" ? rawType : "none";
+  const value = Number((raw as any).value ?? 0);
+  return {
+    type,
+    value: Number.isFinite(value) && value > 0 ? value : 0,
+    code: cleanText((raw as any).code ?? "", 40),
+    name: cleanText((raw as any).name ?? "", 120),
+  };
+}
+
 function sanitizeOrderItems(rawItems: unknown): NormalizedOrderItem[] {
   if (!Array.isArray(rawItems)) return [];
   return rawItems
@@ -309,6 +331,7 @@ router.post("/", authenticate, async (req: AuthenticatedRequest, res: Response) 
     await connectDB();
     const { type, items, customerName, customerPhone, customerId, tableNumber, notes, discount, status, paymentMethod } = req.body;
     const normalizedItems = sanitizeOrderItems(items);
+    const normalizedDiscount = sanitizeOrderDiscount(discount);
 
     if (!type || !normalizedItems.length) {
       return sendError(res, "Order type and at least one valid item are required", 400);
@@ -353,7 +376,7 @@ router.post("/", authenticate, async (req: AuthenticatedRequest, res: Response) 
     ]);
     const { discountAmount, serviceChargeAmount, taxAmount, total } = computeOrderFinancials({
       subtotal,
-      discount,
+      discount: normalizedDiscount,
       orderType: type,
       serviceChargeConfig,
       gstRatePct,
@@ -426,6 +449,10 @@ router.post("/", authenticate, async (req: AuthenticatedRequest, res: Response) 
           subtotal,
           taxAmount,
           gstRatePct,
+          discountType: normalizedDiscount.type,
+          discountValue: normalizedDiscount.value,
+          discountCode: normalizedDiscount.code,
+          discountName: normalizedDiscount.name,
           discountAmount,
           serviceChargeAmount,
           total,

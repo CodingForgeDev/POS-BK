@@ -43,10 +43,14 @@ export function canTransitionOrderStatus(roleRaw: string, fromRaw: string, toRaw
     );
   }
   if (role === "cashier") {
-    // Cashiers can serve ready orders (for takeaway) and close served orders (billing)
+    // Cashiers can serve ready orders (for takeaway), close served orders (billing),
+    // and reject orders that haven't entered the kitchen yet.
     return (
       (from === "ready" && to === "served") ||
-      (from === "served" && to === "closed")
+      (from === "served" && to === "closed") ||
+      (from === "created" && to === "rejected") ||
+      (from === "sent" && to === "rejected") ||
+      (from === "accepted" && to === "rejected")
     );
   }
   return false;

@@ -3,9 +3,7 @@ import { authenticate, AuthenticatedRequest, requireRole } from "../../middlewar
 import { sendSuccess, sendError } from "../../lib/utils";
 import { getZkPullConfig, isZkPullDeviceConfigured } from "../../integrations/zkteco/zkPullConfig";
 import { zkTestDeviceConnection } from "../../integrations/zkteco/zkClient";
-import { runZkPullSync, getZkPullSyncStatus } from "../../integrations/zkteco/zkPullService";
-import { connectDB } from "../../lib/mongodb";
-import ZkDeviceUser from "../../models/ZkDeviceUser.model";
+import { runZkPullSync, getZkPullSyncStatus, syncZkDeviceUsersFromDevice } from "../../integrations/zkteco/zkPullService";
 
 const router: Router = Router();
 
@@ -78,8 +76,7 @@ router.get(
 
 /**
  * GET /api/zk-pull/device-users
- * Returns the ZKTeco user list previously synced to MongoDB via the local zk-sync script.
- * No direct device connection needed — reads from the zkdeviceusers collection.
+ * Fetches enrolled users from the ZKTeco device (TCP), caches in MongoDB, returns the list.
  */
 router.get(
   "/device-users",
@@ -87,28 +84,34 @@ router.get(
   requireRole("admin", "manager"),
   async (_req: AuthenticatedRequest, res: Response) => {
     try {
-      await connectDB();
-      const users = await ZkDeviceUser.find({}).sort({ userId: 1 }).lean();
+      const result = await syncZkDeviceUsersFromDevice();
+      const { users, lastSyncedAt, source, deviceError } = result;
 
-      // Find the most recent sync time across all user records
-      const latest = await ZkDeviceUser.findOne({}).sort({ syncedAt: -1 }).lean();
-      const lastSyncedAt = latest?.syncedAt ?? null;
+      if (users.length === 0 && deviceError) {
+        return res.status(502).json({
+          success: false,
+          message: `Could not reach device: ${deviceError}`,
+          data: { users: [], count: 0, lastSyncedAt, source, deviceError },
+        });
+      }
+
+      const message =
+        source === "device"
+          ? `Loaded ${users.length} user(s) from device`
+          : users.length
+            ? `Loaded ${users.length} cached user(s) (device unreachable)`
+            : "No users found on device";
 
       return sendSuccess(
         res,
         {
-          users: users.map((u) => ({
-            userId: u.userId,
-            name:   u.name,
-            uid:    u.uid,
-            role:   u.role,
-          })),
+          users,
           count: users.length,
           lastSyncedAt,
+          source,
+          deviceError: deviceError ?? null,
         },
-        users.length
-          ? "Device users loaded from last sync"
-          : "No synced users yet — run the zk-sync script on the office PC"
+        message
       );
     } catch (e) {
       const msg = e instanceof Error ? e.message : "Failed to fetch device users";

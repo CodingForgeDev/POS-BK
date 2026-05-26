@@ -20,7 +20,8 @@ import {
 } from "../../lib/deviceAttendanceUpsert";
 import ZkPullDedupe from "../../models/ZkPullDedupe";
 import ZkPullSyncState from "../../models/ZkPullSyncState";
-import { fetchZkAttendanceRecordBuffers } from "./zkClient";
+import { fetchZkAttendanceRecordBuffers, fetchZkDeviceUsers } from "./zkClient";
+import ZkDeviceUser from "../../models/ZkDeviceUser.model";
 import { decodeZkAttendanceRecord40, zkPullFingerprint } from "./zkNormalizer";
 import {
   getZkPullConfig,
@@ -284,6 +285,74 @@ export async function runZkPullSync(override?: Partial<ZkPullConfig>): Promise<Z
     };
   } finally {
     syncInFlight = false;
+  }
+}
+
+export type ZkDeviceUserRow = { userId: string; name: string; uid: number; role: number };
+
+export type SyncZkDeviceUsersResult = {
+  users: ZkDeviceUserRow[];
+  lastSyncedAt: Date | null;
+  source: "device" | "cache";
+  deviceError?: string;
+};
+
+/**
+ * Load enrolled users from the ZKTeco device (TCP), upsert into zkdeviceusers, return list.
+ * On device failure, returns cached MongoDB rows if any.
+ */
+export async function syncZkDeviceUsersFromDevice(): Promise<SyncZkDeviceUsersResult> {
+  await connectDB();
+  const cfg = getZkPullConfig();
+  const dev = isZkPullDeviceConfigured(cfg);
+
+  const readCache = async (): Promise<SyncZkDeviceUsersResult> => {
+    const docs = await ZkDeviceUser.find({}).sort({ userId: 1 }).lean();
+    const latest = await ZkDeviceUser.findOne({}).sort({ syncedAt: -1 }).lean();
+    return {
+      users: docs.map((u) => ({
+        userId: u.userId,
+        name: u.name,
+        uid: u.uid,
+        role: u.role,
+      })),
+      lastSyncedAt: latest?.syncedAt ?? null,
+      source: "cache",
+    };
+  };
+
+  if (!dev.ok) {
+    const cached = await readCache();
+    return { ...cached, deviceError: dev.reason };
+  }
+
+  try {
+    const fetched = await fetchZkDeviceUsers(cfg);
+    const now = new Date();
+    const users: ZkDeviceUserRow[] = [];
+
+    for (const u of fetched) {
+      const userId = (u.userId ?? "").trim();
+      if (!userId) continue;
+      users.push({
+        userId,
+        name: (u.name ?? "").trim(),
+        uid: u.uid ?? 0,
+        role: u.role ?? 0,
+      });
+      await ZkDeviceUser.findOneAndUpdate(
+        { userId },
+        { $set: { name: u.name ?? "", uid: u.uid ?? 0, role: u.role ?? 0, syncedAt: now } },
+        { upsert: true }
+      );
+    }
+
+    users.sort((a, b) => a.userId.localeCompare(b.userId, undefined, { numeric: true }));
+    return { users, lastSyncedAt: now, source: "device" };
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    const cached = await readCache();
+    return { ...cached, deviceError: msg };
   }
 }
 

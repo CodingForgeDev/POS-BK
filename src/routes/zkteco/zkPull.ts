@@ -3,7 +3,12 @@ import { authenticate, AuthenticatedRequest, requireRole } from "../../middlewar
 import { sendSuccess, sendError } from "../../lib/utils";
 import { getZkPullConfig, isZkPullDeviceConfigured } from "../../integrations/zkteco/zkPullConfig";
 import { zkTestDeviceConnection } from "../../integrations/zkteco/zkClient";
-import { runZkPullSync, getZkPullSyncStatus, syncZkDeviceUsersFromDevice } from "../../integrations/zkteco/zkPullService";
+import {
+  runZkPullSync,
+  getZkPullSyncStatus,
+  syncZkDeviceUsersFromDevice,
+  getCachedZkDeviceUsers,
+} from "../../integrations/zkteco/zkPullService";
 
 const router: Router = Router();
 
@@ -82,9 +87,14 @@ router.get(
   "/device-users",
   authenticate,
   requireRole("admin", "manager"),
-  async (_req: AuthenticatedRequest, res: Response) => {
+  async (req: AuthenticatedRequest, res: Response) => {
     try {
-      const result = await syncZkDeviceUsersFromDevice();
+      const refresh =
+        String(req.query.refresh ?? "").toLowerCase() === "1" ||
+        String(req.query.refresh ?? "").toLowerCase() === "true";
+      const result = refresh
+        ? await syncZkDeviceUsersFromDevice()
+        : await getCachedZkDeviceUsers();
       const { users, lastSyncedAt, source, deviceError } = result;
 
       if (users.length === 0 && deviceError) {
@@ -99,8 +109,8 @@ router.get(
         source === "device"
           ? `Loaded ${users.length} user(s) from device`
           : users.length
-            ? `Loaded ${users.length} cached user(s) (device unreachable)`
-            : "No users found on device";
+            ? `Loaded ${users.length} cached user(s)`
+            : "No cached users yet";
 
       return sendSuccess(
         res,

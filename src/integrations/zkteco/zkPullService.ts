@@ -297,6 +297,22 @@ export type SyncZkDeviceUsersResult = {
   deviceError?: string;
 };
 
+export async function getCachedZkDeviceUsers(): Promise<SyncZkDeviceUsersResult> {
+  await connectDB();
+  const docs = await ZkDeviceUser.find({}).sort({ userId: 1 }).lean();
+  const latest = await ZkDeviceUser.findOne({}).sort({ syncedAt: -1 }).lean();
+  return {
+    users: docs.map((u) => ({
+      userId: u.userId,
+      name: u.name,
+      uid: u.uid,
+      role: u.role,
+    })),
+    lastSyncedAt: latest?.syncedAt ?? null,
+    source: "cache",
+  };
+}
+
 /**
  * Load enrolled users from the ZKTeco device (TCP), upsert into zkdeviceusers, return list.
  * On device failure, returns cached MongoDB rows if any.
@@ -306,23 +322,8 @@ export async function syncZkDeviceUsersFromDevice(): Promise<SyncZkDeviceUsersRe
   const cfg = getZkPullConfig();
   const dev = isZkPullDeviceConfigured(cfg);
 
-  const readCache = async (): Promise<SyncZkDeviceUsersResult> => {
-    const docs = await ZkDeviceUser.find({}).sort({ userId: 1 }).lean();
-    const latest = await ZkDeviceUser.findOne({}).sort({ syncedAt: -1 }).lean();
-    return {
-      users: docs.map((u) => ({
-        userId: u.userId,
-        name: u.name,
-        uid: u.uid,
-        role: u.role,
-      })),
-      lastSyncedAt: latest?.syncedAt ?? null,
-      source: "cache",
-    };
-  };
-
   if (!dev.ok) {
-    const cached = await readCache();
+    const cached = await getCachedZkDeviceUsers();
     return { ...cached, deviceError: dev.reason };
   }
 
@@ -351,7 +352,7 @@ export async function syncZkDeviceUsersFromDevice(): Promise<SyncZkDeviceUsersRe
     return { users, lastSyncedAt: now, source: "device" };
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
-    const cached = await readCache();
+    const cached = await getCachedZkDeviceUsers();
     return { ...cached, deviceError: msg };
   }
 }

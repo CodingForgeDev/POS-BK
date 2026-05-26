@@ -1,5 +1,47 @@
 import mongoose from "mongoose";
 
+export interface ICounterSessionDenom {
+  denom: number;
+  qty: number;
+}
+
+export interface ICounterSessionDisbursement {
+  amount: number;
+  remarks: string;
+  authorizedBy: string;
+  timestamp: Date;
+  runningCashAfter: number;
+  journalEntryId?: mongoose.Types.ObjectId;
+}
+
+export interface ICounterSession {
+  status: "open" | "closed";
+  openedAt: Date;
+  closedAt?: Date;
+  openedBy?: mongoose.Types.ObjectId;
+  closedBy?: mongoose.Types.ObjectId;
+  cashierName?: string;
+  counterName?: string;
+  cashSales?: number;
+  cardSales?: number;
+  bankTransferSales?: number;
+  totalSales?: number;
+  sessionOpeningBalance?: number;
+  countedTotal?: number;
+  countedDenominations?: ICounterSessionDenom[];
+  openingBalance?: number;
+  openingDenominations?: ICounterSessionDenom[];
+  depositedAmount?: number;
+  tomorrowOpening?: number;
+  netDeposit?: number;
+  difference?: number;
+  disbursements?: ICounterSessionDisbursement[];
+  totalDisbursed?: number;
+  remarks?: string;
+  expectedCashInHand?: number;
+  closeJournalEntryId?: mongoose.Types.ObjectId;
+}
+
 const DenomSchema = new mongoose.Schema(
   {
     denom: { type: Number, required: true },
@@ -60,4 +102,4 @@ if (mongoose.models.CounterSession) {
   delete mongoose.models.CounterSession;
 }
 
-export default mongoose.model("CounterSession", CounterSessionSchema) as mongoose.Model<any>;
+export default mongoose.model<ICounterSession>("CounterSession", CounterSessionSchema);

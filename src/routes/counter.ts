@@ -11,7 +11,7 @@ import {
   postCounterDisbursement,
 } from "../lib/counterPosting";
 
-const router = Router();
+const router: Router = Router();
 
 const roundMoney = (v: unknown) => Number(Number(v || 0).toFixed(2));
 const roleCanDisburse = (role: unknown) =>

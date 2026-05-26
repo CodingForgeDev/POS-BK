@@ -32,15 +32,44 @@ router.post(
   requireRole("admin", "manager"),
   async (_req: AuthenticatedRequest, res: Response) => {
     try {
-      const result = await runZkPullSync();
-      if (!result.ok) {
+      // Attempt a live TCP pull first (works when the server can directly reach the device).
+      // Use a shorter connect timeout so the route responds in reasonable time when the device
+      // is unreachable (e.g. local network — server can't reach it over internet).
+      const result = await runZkPullSync({ connectTimeoutMs: 4_000 });
+      if (result.ok) {
+        return sendSuccess(res, result, "ZK pull sync completed");
+      }
+
+      // TCP sync failed (device not reachable from server) — fall back to last sync state
+      // written by the office-PC local script (zk-sync.js → zkpullsyncstates collection).
+      const status = await getZkPullSyncStatus();
+      const state  = status.state as Record<string, unknown> | null;
+
+      if (!state?.lastSyncAt) {
         return res.status(400).json({
           success: false,
-          message: result.message || "ZK pull sync failed",
-          data: result,
+          message:
+            "Biometric device is not reachable from the server, and no local sync has been " +
+            "performed yet. Run the \"Sync Biometric Users\" shortcut on the office PC first.",
+          data: { ok: false, logsFetched: 0, logsProcessed: 0, logsSkipped: 0, employeeNotFound: 0 },
         });
       }
-      return sendSuccess(res, result, "ZK pull sync completed");
+
+      // Return the last local-script sync stats so the frontend can display them.
+      return sendSuccess(
+        res,
+        {
+          ok:               true,
+          source:           "local-script",
+          lastSyncAt:       state.lastSyncAt,
+          logsFetched:      state.logsFetched  ?? 0,
+          logsProcessed:    state.logsProcessed ?? 0,
+          logsSkipped:      state.logsSkipped  ?? 0,
+          employeeNotFound: state.employeeNotFound ?? 0,
+          unknownPunchType: state.unknownPunchType  ?? 0,
+        },
+        `Attendance data is up to date — last synced by office PC at ${new Date(state.lastSyncAt as Date).toLocaleString()}`
+      );
     } catch (e) {
       const msg = e instanceof Error ? e.message : "ZK pull sync failed";
       return sendError(res, msg, 500);

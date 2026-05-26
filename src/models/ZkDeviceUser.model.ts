@@ -1,7 +1,7 @@
-import mongoose, { Schema, Document } from "mongoose";
+import mongoose, { Schema } from "mongoose";
 
-export interface IZkDeviceUser extends Document {
-  userId: string;   // ZKTeco PIN — matches Employee.deviceUserId
+export interface IZkDeviceUser {
+  userId: string; // ZKTeco PIN — matches Employee.deviceUserId
   name: string;
   uid: number;
   role: number;
@@ -19,5 +19,5 @@ const ZkDeviceUserSchema = new Schema<IZkDeviceUser>(
   { collection: "zkdeviceusers", timestamps: false }
 );
 
-export default mongoose.models.ZkDeviceUser ||
-  mongoose.model<IZkDeviceUser>("ZkDeviceUser", ZkDeviceUserSchema);
+export default (mongoose.models.ZkDeviceUser ||
+  mongoose.model<IZkDeviceUser>("ZkDeviceUser", ZkDeviceUserSchema)) as mongoose.Model<IZkDeviceUser>;

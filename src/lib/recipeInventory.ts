@@ -299,8 +299,9 @@ async function postPOSOrderJournalEntry(
   }
 
   if (!paymentAccount || !revenueAccount || !taxAccount) {
-    console.warn("Skipped POS journal entry: missing payment, revenue, or tax account mapping");
-    return;
+    throw new Error(
+      "POS posting configuration is incomplete. Please configure payment, sales revenue, and GST accounts in Settings."
+    );
   }
 
   const lines: any[] = [
@@ -400,7 +401,7 @@ async function postPOSOrderJournalEntry(
     });
   } catch (err: any) {
     if (err?.message === "Journal entry already exists for this source") return;
-    console.error("Failed to create POS order journal entry:", err);
+    throw err;
   }
 }
 

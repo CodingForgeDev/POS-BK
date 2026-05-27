@@ -131,7 +131,13 @@ export async function resolveExpenseDebitAccount(
 export async function resolveExpensePaymentAccount(
   paymentMethod: string
 ): Promise<any | null> {
-  const method = String(paymentMethod || "").toLowerCase();
+  const rawMethod = String(paymentMethod || "").trim().toLowerCase();
+  // POS frontend sends "digital" for bank/wallet payments.
+  // Normalize aliases so all non-cash bank channels hit bank mapping.
+  const method =
+    rawMethod === "digital" || rawMethod === "bank" || rawMethod === "transfer"
+      ? "bank_transfer"
+      : rawMethod;
   const paymentAccounts = normalizePaymentAccounts(await getSettingValue<any[]>("paymentAccounts"));
 
   if (Array.isArray(paymentAccounts) && paymentAccounts.length > 0) {

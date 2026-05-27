@@ -11,7 +11,17 @@ import Purchase from "../models/Purchase";
 import StockLayer from "../models/StockLayer";
 import { deductInventoryFifo } from "../lib/inventoryFifo";
 import { InsufficientStockError } from "../lib/inventoryErrors";
-import { createJournalEntryRecord, createReturnJournalEntry, normalizeJournalLines, validateJournalBalance, reverseJournalEntryRecord } from "../lib/journalPosting";
+import {
+  createJournalEntryRecord,
+  createReturnJournalEntry,
+  normalizeJournalLines,
+  validateJournalBalance,
+  reverseJournalEntryRecord,
+  resolvePosPostingAccounts,
+} from "../lib/journalPosting";
+import Invoice from "../models/Invoice";
+import Order from "../models/Order";
+import { isAdminOrManagerRoleName } from "../lib/role-utils";
 
 async function applyPurchaseReturnInventoryDeduction(returnRecord: any, session: mongoose.ClientSession | null = null) {
   if (!returnRecord || String(returnRecord.returnType).trim().toLowerCase() !== "purchase") {
@@ -67,6 +77,125 @@ function sanitizeMetadata(value: unknown): Record<string, unknown> {
     return {};
   }
   return { ...(value as Record<string, unknown>) };
+}
+
+async function createMissingPosJournalForInvoice(invoice: any) {
+  if (!invoice?.order) {
+    return { created: false, reason: "Invoice has no linked order" };
+  }
+
+  const order = await Order.findById(String(invoice.order)).lean();
+  if (!order) {
+    return { created: false, reason: "Linked order not found" };
+  }
+
+  const existing = await JournalEntry.findOne({
+    source: "POS",
+    sourceId: order._id,
+  }).lean();
+  if (existing) {
+    return { created: false, reason: "Journal already exists" };
+  }
+
+  const total = Number(invoice.total || 0);
+  const subtotal = Number(invoice.subtotal || order.subtotal || 0);
+  const taxAmount = Number(invoice.taxAmount || 0);
+  const serviceChargeAmount = Number(invoice.serviceChargeAmount || 0);
+  const orderDiscountAmount = Number(order.discountAmount || 0);
+  const paymentAccountDiscountAmount = Number(invoice.paymentAccountDiscountAmount || 0);
+
+  if (total <= 0) {
+    return { created: false, reason: "Invoice total is zero" };
+  }
+
+  const {
+    paymentAccount,
+    revenueAccount,
+    taxAccount,
+    serviceAccount,
+    discountAccount: resolvedDiscountAccount,
+  } = await resolvePosPostingAccounts(String(invoice.paymentMethod || ""));
+
+  if (!paymentAccount || !revenueAccount || !taxAccount) {
+    throw new Error(
+      `Missing posting account mapping for invoice ${String(invoice.invoiceNumber || invoice._id)}`
+    );
+  }
+
+  let discountAccount: any = null;
+  if (orderDiscountAmount > 0 || paymentAccountDiscountAmount > 0) {
+    discountAccount = resolvedDiscountAccount || revenueAccount;
+  }
+
+  const lines: any[] = [
+    {
+      account: paymentAccount._id,
+      accountName: paymentAccount.title,
+      debit: total,
+      credit: 0,
+      note: `POS order ${String((order as any).orderNumber || order._id)}`,
+    },
+  ];
+
+  if (orderDiscountAmount > 0) {
+    lines.push({
+      account: discountAccount?._id || revenueAccount._id,
+      accountName: discountAccount?.title || revenueAccount.title,
+      debit: orderDiscountAmount,
+      credit: 0,
+      note: `Order discount for ${String((order as any).orderNumber || order._id)}`,
+    });
+  }
+
+  if (paymentAccountDiscountAmount > 0) {
+    lines.push({
+      account: discountAccount?._id || revenueAccount._id,
+      accountName: discountAccount?.title || revenueAccount.title,
+      debit: paymentAccountDiscountAmount,
+      credit: 0,
+      note: `Payment account discount for ${String((order as any).orderNumber || order._id)}`,
+    });
+  }
+
+  lines.push(
+    {
+      account: revenueAccount._id,
+      accountName: revenueAccount.title,
+      debit: 0,
+      credit: subtotal,
+      note: `POS sales revenue for ${String((order as any).orderNumber || order._id)}`,
+    },
+    {
+      account: taxAccount._id,
+      accountName: taxAccount.title,
+      debit: 0,
+      credit: taxAmount,
+      note: `GST for ${String((order as any).orderNumber || order._id)}`,
+    }
+  );
+
+  if (serviceChargeAmount > 0) {
+    lines.push({
+      account: serviceAccount?._id || revenueAccount._id,
+      accountName: serviceAccount?.title || revenueAccount.title,
+      debit: 0,
+      credit: serviceChargeAmount,
+      note: `Service charge for ${String((order as any).orderNumber || order._id)}`,
+    });
+  }
+
+  await createJournalEntryRecord({
+    date: invoice.createdAt ? new Date(invoice.createdAt) : new Date(),
+    reference: String(invoice.invoiceNumber || ""),
+    description: `POS sale invoice ${String(invoice.invoiceNumber || invoice._id)}`,
+    lines,
+    source: "POS",
+    sourceId: order._id,
+    postedBy: invoice.issuedBy || null,
+    status: "posted",
+  });
+
+  return { created: true, reason: "Created" };
 }
 
 async function assertSingleInventoryAccount(
@@ -507,6 +636,86 @@ router.get("/journal", authenticate, async (req: AuthenticatedRequest, res: Resp
   } catch (error) {
     console.error("Accounting journal list error:", error);
     return sendError(res, "Failed to fetch journal entries", 500);
+  }
+});
+
+router.post("/journal/backfill-pos", authenticate, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    await connectDB();
+
+    if (!(await isAdminOrManagerRoleName(req.user.role))) {
+      return sendError(res, "Unauthorized", 403);
+    }
+
+    const { dateFrom, dateTo, dryRun = false, limit = 500 } = req.body as Record<string, unknown>;
+    const parsedLimit = Math.min(Math.max(Number(limit) || 500, 1), 5000);
+
+    const query: any = {};
+    if (dateFrom || dateTo) {
+      query.createdAt = {};
+      if (dateFrom) query.createdAt.$gte = new Date(String(dateFrom));
+      if (dateTo) {
+        const d = new Date(String(dateTo));
+        d.setHours(23, 59, 59, 999);
+        query.createdAt.$lte = d;
+      }
+    }
+
+    const invoices = await Invoice.find(query)
+      .sort({ createdAt: -1 })
+      .limit(parsedLimit)
+      .select("_id invoiceNumber order paymentMethod subtotal taxAmount serviceChargeAmount total paymentAccountDiscountAmount createdAt issuedBy")
+      .lean();
+
+    let created = 0;
+    let skipped = 0;
+    let failed = 0;
+    const failures: Array<{ invoiceId: string; invoiceNumber: string; reason: string }> = [];
+
+    for (const invoice of invoices as any[]) {
+      try {
+        if (dryRun) {
+          const order = invoice?.order ? await Order.findById(String(invoice.order)).select("_id").lean() : null;
+          if (!order) {
+            skipped += 1;
+            continue;
+          }
+          const existing = await JournalEntry.findOne({ source: "POS", sourceId: order._id }).select("_id").lean();
+          if (existing) {
+            skipped += 1;
+          } else {
+            created += 1;
+          }
+          continue;
+        }
+
+        const result = await createMissingPosJournalForInvoice(invoice);
+        if (result.created) {
+          created += 1;
+        } else {
+          skipped += 1;
+        }
+      } catch (error: any) {
+        failed += 1;
+        failures.push({
+          invoiceId: String(invoice._id || ""),
+          invoiceNumber: String(invoice.invoiceNumber || ""),
+          reason: error?.message || "Unknown error",
+        });
+      }
+    }
+
+    return sendSuccess(res, {
+      totalScanned: invoices.length,
+      created,
+      skipped,
+      failed,
+      dryRun: Boolean(dryRun),
+      failures,
+    }, dryRun ? "Backfill dry run completed" : "POS journal backfill completed");
+  } catch (error: any) {
+    console.error("Accounting POS backfill error:", error);
+    return sendError(res, error?.message || "Failed to backfill POS journals", 500);
   }
 });
 

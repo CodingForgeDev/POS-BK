@@ -101,7 +101,9 @@ async function createMissingPosJournalForInvoice(invoice: any) {
   const subtotal = Number(invoice.subtotal || order.subtotal || 0);
   const taxAmount = Number(invoice.taxAmount || 0);
   const serviceChargeAmount = Number(invoice.serviceChargeAmount || 0);
-  const orderDiscountAmount = Number(order.discountAmount || 0);
+  // invoice.discountAmount = order-level discount + billing-dialog discount (combined).
+  // Must use the invoice field, not order.discountAmount, or dialog discounts are missed.
+  const orderDiscountAmount = Number(invoice.discountAmount ?? order.discountAmount ?? 0);
   const paymentAccountDiscountAmount = Number(invoice.paymentAccountDiscountAmount || 0);
 
   if (total <= 0) {
@@ -667,7 +669,7 @@ router.post("/journal/backfill-pos", authenticate, async (req: AuthenticatedRequ
     const invoices = await Invoice.find(query)
       .sort({ createdAt: -1 })
       .limit(parsedLimit)
-      .select("_id invoiceNumber order paymentMethod subtotal taxAmount serviceChargeAmount total paymentAccountDiscountAmount createdAt issuedBy")
+      .select("_id invoiceNumber order paymentMethod subtotal taxAmount serviceChargeAmount discountAmount total paymentAccountDiscountAmount createdAt issuedBy")
       .lean();
 
     let created = 0;

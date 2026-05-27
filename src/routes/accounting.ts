@@ -157,22 +157,25 @@ async function createMissingPosJournalForInvoice(invoice: any) {
     });
   }
 
-  lines.push(
-    {
+  if (subtotal > 0) {
+    lines.push({
       account: revenueAccount._id,
       accountName: revenueAccount.title,
       debit: 0,
       credit: subtotal,
       note: `POS sales revenue for ${String((order as any).orderNumber || order._id)}`,
-    },
-    {
+    });
+  }
+
+  if (taxAmount > 0) {
+    lines.push({
       account: taxAccount._id,
       accountName: taxAccount.title,
       debit: 0,
       credit: taxAmount,
       note: `GST for ${String((order as any).orderNumber || order._id)}`,
-    }
-  );
+    });
+  }
 
   if (serviceChargeAmount > 0) {
     lines.push({

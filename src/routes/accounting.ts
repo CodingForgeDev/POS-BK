@@ -11,10 +11,6 @@ import Purchase from "../models/Purchase";
 import StockLayer from "../models/StockLayer";
 import { deductInventoryFifo } from "../lib/inventoryFifo";
 import { InsufficientStockError } from "../lib/inventoryErrors";
-import { createJournalEntryRecord, createReturnJournalEntry, normalizeJournalLines, validateJournalBalance, reverseJournalEntryRecord } from "../lib/journalPosting";
-import Invoice from "../models/Invoice";
-import Order from "../models/Order";
-import { postPOSOrderJournalEntry } from "../lib/recipeInventory";
 import {
   createJournalEntryRecord,
   createReturnJournalEntry,
@@ -88,7 +84,7 @@ async function createMissingPosJournalForInvoice(invoice: any) {
     return { created: false, reason: "Invoice has no linked order" };
   }
 
-  const order = await Order.findById(String(invoice.order)).lean();
+  const order = await Order.findById(String(invoice.order)).lean() as any;
   if (!order) {
     return { created: false, reason: "Linked order not found" };
   }
@@ -679,7 +675,7 @@ router.post("/journal/backfill-pos", authenticate, async (req: AuthenticatedRequ
     for (const invoice of invoices as any[]) {
       try {
         if (dryRun) {
-          const order = invoice?.order ? await Order.findById(String(invoice.order)).select("_id").lean() : null;
+          const order = invoice?.order ? await Order.findById(String(invoice.order)).select("_id").lean() as any : null;
           if (!order) {
             skipped += 1;
             continue;

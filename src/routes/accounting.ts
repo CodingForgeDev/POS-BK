@@ -12,6 +12,9 @@ import StockLayer from "../models/StockLayer";
 import { deductInventoryFifo } from "../lib/inventoryFifo";
 import { InsufficientStockError } from "../lib/inventoryErrors";
 import { createJournalEntryRecord, createReturnJournalEntry, normalizeJournalLines, validateJournalBalance, reverseJournalEntryRecord } from "../lib/journalPosting";
+import Invoice from "../models/Invoice";
+import Order from "../models/Order";
+import { postPOSOrderJournalEntry } from "../lib/recipeInventory";
 
 async function applyPurchaseReturnInventoryDeduction(returnRecord: any, session: mongoose.ClientSession | null = null) {
   if (!returnRecord || String(returnRecord.returnType).trim().toLowerCase() !== "purchase") {
@@ -1299,6 +1302,111 @@ router.patch("/returns/:id", authenticate, async (req: AuthenticatedRequest, res
   } catch (error: any) {
     console.error("Accounting update return error:", error);
     return sendError(res, error?.message || "Failed to update return", 500);
+  }
+});
+
+// ── POS Journal Backfill ──────────────────────────────────────────────────────
+// Creates missing POS journal entries for invoices in a given date range.
+// Useful when invoices were created before journal posting was wired up, or
+// after a data migration.  Pass dryRun=true to preview without writing.
+router.post("/journal/backfill-pos", authenticate, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    await connectDB();
+    const role = String(req.user?.role ?? "").trim().toLowerCase();
+    if (!["admin", "manager"].includes(role)) {
+      return sendError(res, "Unauthorized: admin or manager role required", 403);
+    }
+
+    const { dateFrom, dateTo, dryRun = true, limit = 1000 } = req.body as {
+      dateFrom?: string; dateTo?: string; dryRun?: boolean; limit?: number;
+    };
+
+    // Build date filter on invoice createdAt
+    const dateFilter: Record<string, Date> = {};
+    if (dateFrom) dateFilter.$gte = new Date(dateFrom);
+    if (dateTo) {
+      const end = new Date(dateTo);
+      end.setHours(23, 59, 59, 999);
+      dateFilter.$lte = end;
+    }
+
+    const invoiceQuery: Record<string, unknown> = {
+      status: { $in: ["paid", "refunded", "partial"] },
+    };
+    if (Object.keys(dateFilter).length > 0) invoiceQuery.createdAt = dateFilter;
+
+    const invoices = await Invoice.find(invoiceQuery)
+      .limit(Math.min(Number(limit) || 1000, 5000))
+      .populate("order")
+      .lean();
+
+    // Find which orders already have a POS journal entry
+    const orderIds = (invoices as any[])
+      .map((inv: any) => inv.order?._id)
+      .filter(Boolean);
+
+    const existingEntries = await JournalEntry.find({
+      source: "POS",
+      sourceId: { $in: orderIds },
+    }).select("sourceId").lean();
+
+    const alreadyPosted = new Set(
+      (existingEntries as any[]).map((e: any) => String(e.sourceId))
+    );
+
+    const summary = {
+      scanned: invoices.length,
+      skipped: 0,
+      created: 0,
+      failed: 0,
+      dryRun: Boolean(dryRun),
+      failures: [] as Array<{ invoiceNumber: string; error: string }>,
+    };
+
+    for (const invoice of invoices as any[]) {
+      const order = invoice.order;
+      if (!order?._id) {
+        summary.skipped++;
+        continue;
+      }
+
+      if (alreadyPosted.has(String(order._id))) {
+        summary.skipped++;
+        continue;
+      }
+
+      if (dryRun) {
+        summary.created++; // would-be creates in dry-run
+        continue;
+      }
+
+      try {
+        // Pass empty allocations — inventory was already deducted at sale time;
+        // we only need the revenue/tax/payment side of the entry.
+        await postPOSOrderJournalEntry(order, invoice, [], null);
+        summary.created++;
+      } catch (err: any) {
+        // "already exists" is not a real failure during backfill
+        if (String(err?.message).includes("already exists")) {
+          summary.skipped++;
+        } else {
+          summary.failed++;
+          summary.failures.push({
+            invoiceNumber: String(invoice.invoiceNumber || ""),
+            error: err?.message || "Unknown error",
+          });
+        }
+      }
+    }
+
+    return sendSuccess(
+      res,
+      summary,
+      dryRun ? "Dry-run complete — no data written" : "Backfill complete"
+    );
+  } catch (error: any) {
+    console.error("POS journal backfill error:", error);
+    return sendError(res, error?.message || "Backfill failed", 500);
   }
 });
 

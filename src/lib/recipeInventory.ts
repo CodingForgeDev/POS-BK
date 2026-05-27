@@ -247,7 +247,7 @@ async function findReadyInventoryForProducts(
   return result;
 }
 
-async function postPOSOrderJournalEntry(
+export async function postPOSOrderJournalEntry(
   order: any,
   invoice: any,
   allocations: Array<{ inventoryItem: mongoose.Types.ObjectId; quantityConsumed: number; fifoAllocations: FifoAllocation[] }>,

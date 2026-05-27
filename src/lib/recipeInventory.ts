@@ -247,7 +247,7 @@ async function findReadyInventoryForProducts(
   return result;
 }
 
-export async function postPOSOrderJournalEntry(
+async function postPOSOrderJournalEntry(
   order: any,
   invoice: any,
   allocations: Array<{ inventoryItem: mongoose.Types.ObjectId; quantityConsumed: number; fifoAllocations: FifoAllocation[] }>,
@@ -299,8 +299,9 @@ export async function postPOSOrderJournalEntry(
   }
 
   if (!paymentAccount || !revenueAccount || !taxAccount) {
-    console.warn("Skipped POS journal entry: missing payment, revenue, or tax account mapping");
-    return;
+    throw new Error(
+      "POS posting configuration is incomplete. Please configure payment, sales revenue, and GST accounts in Settings."
+    );
   }
 
   const lines: any[] = [
@@ -400,7 +401,7 @@ export async function postPOSOrderJournalEntry(
     });
   } catch (err: any) {
     if (err?.message === "Journal entry already exists for this source") return;
-    console.error("Failed to create POS order journal entry:", err);
+    throw err;
   }
 }
 

@@ -259,7 +259,9 @@ async function postPOSOrderJournalEntry(
   const subtotal = Number(order.subtotal || 0);
   const taxAmount = Number(invoice.taxAmount || 0);
   const serviceChargeAmount = Number(invoice.serviceChargeAmount || 0);
-  const discountAmount = Number(order.discountAmount || 0);
+  // invoice.discountAmount = order-level + billing-dialog discount (combined at checkout).
+  // Must use invoice field so the debit side matches the already-reduced invoice.total.
+  const discountAmount = Number(invoice.discountAmount ?? order.discountAmount ?? 0);
   const paymentAccountDiscountAmount = Number(invoice.paymentAccountDiscountAmount || 0);
   if (!total || total <= 0) return;
 
@@ -338,22 +340,25 @@ async function postPOSOrderJournalEntry(
     });
   }
 
-  lines.push(
-    {
+  if (subtotal > 0) {
+    lines.push({
       account: revenueAccount._id,
       accountName: revenueAccount.title,
       debit: 0,
       credit: subtotal,
       note: `POS sales revenue for ${order.orderNumber}`,
-    },
-    {
+    });
+  }
+
+  if (taxAmount > 0) {
+    lines.push({
       account: taxAccount._id,
       accountName: taxAccount.title,
       debit: 0,
       credit: taxAmount,
       note: `GST for ${order.orderNumber}`,
-    }
-  );
+    });
+  }
 
   if (serviceChargeAmount > 0) {
     lines.push({

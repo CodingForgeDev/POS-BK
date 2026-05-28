@@ -7,9 +7,11 @@ import Purchase from "../models/Purchase";
 import StockLayer from "../models/StockLayer";
 import Inventory from "../models/Inventory";
 import Supplier from "../models/Supplier";
+import Payment from "../models/Payment";
 import LedgerAccount from "../models/LedgerAccount";
 import JournalEntry from "../models/JournalEntry";
 import { postPurchaseInSession, type PostPurchaseLineInput } from "../lib/purchasePosting";
+import { recalculateProductCostPriceForInventoryItem } from "../lib/recipeInventory";
 import {
   createJournalEntryRecord,
   resolvePurchasePostingAccounts,
@@ -619,6 +621,93 @@ router.patch("/:id", authenticate, async (req: AuthenticatedRequest, res: Respon
   } catch (error) {
     console.error("Update purchase outer error:", error);
     return sendError(res, "Failed to update purchase", 500);
+  }
+});
+
+router.delete("/:id", authenticate, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    await connectDB();
+    if (!["admin", "manager"].includes(req.user.role)) {
+      return sendError(res, "Unauthorized", 403);
+    }
+
+    const purchaseId = req.params.id;
+    const purchaseDoc = (await Purchase.findById(purchaseId).lean()) as any;
+    if (!purchaseDoc) return sendError(res, "Purchase not found", 404);
+    if (String(purchaseDoc.status) !== "posted") {
+      return sendError(res, "Only posted purchases can be deleted", 400);
+    }
+    if (Number(purchaseDoc.paidAmount || 0) > 0 || String(purchaseDoc.paymentStatus) !== "unpaid") {
+      return sendError(res, "Cannot delete a purchase with payment history", 400);
+    }
+
+    const existingPayment = await Payment.findOne({ purchaseId: purchaseDoc._id, status: "posted" }).lean();
+    if (existingPayment) {
+      return sendError(res, "Cannot delete a purchase with supplier payment records", 400);
+    }
+
+    const stockLayers = await StockLayer.find({ purchase: purchaseDoc._id }).lean();
+    if (stockLayers.some((layer) => Number(layer.quantityRemaining) !== Number(layer.quantityOriginal))) {
+      return sendError(res, "Cannot delete a purchase after some stock has been consumed", 400);
+    }
+
+    const inventoryAdjustments = stockLayers.reduce<Record<string, number>>((acc, layer) => {
+      const invId = String(layer.inventoryItem);
+      acc[invId] = (acc[invId] || 0) + Number(layer.quantityOriginal || 0);
+      return acc;
+    }, {});
+
+    const session = await mongoose.startSession();
+    const performDelete = async (sess: ClientSession | null) => {
+      const opts = sess ? { session: sess } : undefined;
+
+      for (const [inventoryItemId, quantity] of Object.entries(inventoryAdjustments)) {
+        await Inventory.updateOne(
+          { _id: inventoryItemId },
+          { $inc: { currentStock: -quantity } },
+          opts
+        );
+      }
+
+      await StockLayer.deleteMany({ purchase: purchaseDoc._id }, opts);
+      await JournalEntry.deleteOne({ source: "PURCHASE", sourceId: purchaseDoc._id }, opts);
+      await Purchase.deleteOne({ _id: purchaseDoc._id }, opts);
+
+      for (const inventoryItemId of Object.keys(inventoryAdjustments)) {
+        await recalculateProductCostPriceForInventoryItem(inventoryItemId, sess);
+      }
+    };
+
+    try {
+      await session.withTransaction(async () => {
+        await performDelete(session);
+      });
+    } catch (e: unknown) {
+      const err = e as { message?: string; code?: number };
+      const msg = err?.message ?? String(e);
+      const code = err?.code;
+      const isTransactionUnavailable =
+        code === 20 || /replica set/i.test(msg) || /Transaction numbers/i.test(msg);
+      if (isTransactionUnavailable) {
+        console.warn("Transactions unavailable, falling back to non-transactional purchase delete.");
+        try {
+          await performDelete(null);
+        } catch (innerError: unknown) {
+          console.error("Purchase delete fallback error:", innerError);
+          return sendError(res, "Failed to delete purchase", 500);
+        }
+      } else {
+        console.error("Purchase delete error:", e);
+        return sendError(res, "Failed to delete purchase", 500);
+      }
+    } finally {
+      session.endSession();
+    }
+
+    return sendSuccess(res, null, "Purchase deleted");
+  } catch (error) {
+    console.error("Delete purchase outer error:", error);
+    return sendError(res, "Failed to delete purchase", 500);
   }
 });
 

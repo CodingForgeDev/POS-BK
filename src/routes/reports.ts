@@ -72,11 +72,19 @@ router.get("/", authenticate, async (req: AuthenticatedRequest, res: Response) =
         { $sort: { total: -1 } },
       ]),
       Invoice.aggregate([
-        { $match: { ...dateFilter, discountAmount: { $gt: 0 } } },
+        {
+          $match: {
+            ...dateFilter,
+            $or: [
+              { discountAmount: { $gt: 0 } },
+              { paymentAccountDiscountAmount: { $gt: 0 } },
+            ],
+          },
+        },
         {
           $group: {
             _id: "$discountType",
-            totalDiscount: { $sum: "$discountAmount" },
+            totalDiscount: { $sum: { $add: ["$discountAmount", "$paymentAccountDiscountAmount"] } },
             count: { $sum: 1 },
           },
         },
@@ -84,8 +92,14 @@ router.get("/", authenticate, async (req: AuthenticatedRequest, res: Response) =
     ]);
 
     const totalRevenue = (invoices as any[]).reduce((sum, inv) => sum + inv.total, 0);
+    const totalSubtotal = (invoices as any[]).reduce((sum, inv) => sum + Number(inv.subtotal || 0), 0);
     const totalTax = (invoices as any[]).reduce((sum, inv) => sum + inv.taxAmount, 0);
-    const totalDiscount = (invoices as any[]).reduce((sum, inv) => sum + inv.discountAmount, 0);
+    const totalServiceCharge = (invoices as any[]).reduce((sum, inv) => sum + Number(inv.serviceChargeAmount || 0), 0);
+    const totalDiscount = (invoices as any[]).reduce(
+      (sum, inv) => sum + Number(inv.discountAmount || 0) + Number(inv.paymentAccountDiscountAmount || 0),
+      0
+    );
+    const netSalesAfterDiscount = Math.max(0, totalSubtotal - totalDiscount);
     const totalOrders = invoices.length;
     const avgOrderValue = totalOrders > 0 ? totalRevenue / totalOrders : 0;
     const totalExpenses = expensesByCategory.reduce((sum, e) => sum + e.total, 0);
@@ -104,7 +118,10 @@ router.get("/", authenticate, async (req: AuthenticatedRequest, res: Response) =
       period: { type, startDate, endDate },
       summary: {
         totalRevenue,
+        totalSubtotal,
+        netSalesAfterDiscount,
         totalTax,
+        totalServiceCharge,
         totalDiscount,
         totalOrders,
         avgOrderValue,

@@ -105,6 +105,9 @@ async function createMissingPosJournalForInvoice(invoice: any) {
   // Must use the invoice field, not order.discountAmount, or dialog discounts are missed.
   const orderDiscountAmount = Number(invoice.discountAmount ?? order.discountAmount ?? 0);
   const paymentAccountDiscountAmount = Number(invoice.paymentAccountDiscountAmount || 0);
+  const combinedDiscountAmount = orderDiscountAmount + paymentAccountDiscountAmount;
+  const netAfterDiscount = Math.max(0, subtotal - combinedDiscountAmount);
+  const grandTotal = netAfterDiscount + serviceChargeAmount + taxAmount;
 
   if (total <= 0) {
     return { created: false, reason: "Invoice total is zero" };
@@ -198,9 +201,96 @@ async function createMissingPosJournalForInvoice(invoice: any) {
     sourceId: order._id,
     postedBy: invoice.issuedBy || null,
     status: "posted",
+    grossSubtotal: subtotal,
+    discountAmount: combinedDiscountAmount,
+    netAfterDiscount,
+    gstAmount: taxAmount,
+    serviceChargeAmount,
+    grandTotal,
   });
 
   return { created: true, reason: "Created" };
+}
+
+async function buildPosInvoiceLookup(posEntries: Array<{ reference?: string; sourceId?: any }>) {
+  const invoiceRefs = Array.from(
+    new Set(
+      posEntries
+        .map((entry) => String(entry.reference || "").trim())
+        .filter(Boolean)
+    )
+  );
+  const orderIds = Array.from(
+    new Set(
+      posEntries
+        .map((entry) => (entry.sourceId ? String(entry.sourceId) : ""))
+        .filter((id) => mongoose.Types.ObjectId.isValid(id))
+    )
+  ).map((id) => new mongoose.Types.ObjectId(id));
+
+  if (!invoiceRefs.length && !orderIds.length) {
+    return new Map<string, any>();
+  }
+
+  const invoiceQuery: any = {
+    $or: [
+      ...(invoiceRefs.length ? [{ invoiceNumber: { $in: invoiceRefs } }] : []),
+      ...(orderIds.length ? [{ order: { $in: orderIds } }] : []),
+    ],
+  };
+
+  const invoices = await Invoice.find(invoiceQuery)
+    .select("invoiceNumber order subtotal discountAmount paymentAccountDiscountAmount taxAmount serviceChargeAmount total")
+    .lean();
+
+  const lookup = new Map<string, any>();
+  for (const inv of invoices as any[]) {
+    if (inv?.invoiceNumber) {
+      lookup.set(`ref:${String(inv.invoiceNumber)}`, inv);
+    }
+    if (inv?.order) {
+      lookup.set(`order:${String(inv.order)}`, inv);
+    }
+  }
+  return lookup;
+}
+
+function getEntryBillingSnapshot(entry: any, invoiceLookup: Map<string, any>) {
+  const ownSnapshot = {
+    grossSubtotal: Number(entry.grossSubtotal || 0),
+    discountAmount: Number(entry.discountAmount || 0),
+    netAfterDiscount: Number(entry.netAfterDiscount || 0),
+    gstAmount: Number(entry.gstAmount || 0),
+    serviceChargeAmount: Number(entry.serviceChargeAmount || 0),
+    grandTotal: Number(entry.grandTotal || 0),
+  };
+
+  if (entry.source !== "POS") return ownSnapshot;
+
+  const refKey = `ref:${String(entry.reference || "").trim()}`;
+  const orderKey = entry.sourceId ? `order:${String(entry.sourceId)}` : "";
+  const invoice = invoiceLookup.get(refKey) || (orderKey ? invoiceLookup.get(orderKey) : null);
+  // Always prefer invoice-derived values for POS rows so Ledger/Journal stay
+  // exactly aligned with Billing/CashBook math, even if legacy journal rows
+  // contain stale or incorrectly ordered snapshot fields.
+  if (!invoice) return ownSnapshot;
+
+  const grossSubtotal = Number(invoice.subtotal || 0);
+  const discountAmount =
+    Number(invoice.discountAmount || 0) + Number(invoice.paymentAccountDiscountAmount || 0);
+  const netAfterDiscount = Math.max(0, grossSubtotal - discountAmount);
+  const gstAmount = Number(invoice.taxAmount || 0);
+  const serviceChargeAmount = Number(invoice.serviceChargeAmount || 0);
+  const grandTotal = Number(invoice.total || 0) || netAfterDiscount + gstAmount + serviceChargeAmount;
+
+  return {
+    grossSubtotal,
+    discountAmount,
+    netAfterDiscount,
+    gstAmount,
+    serviceChargeAmount,
+    grandTotal,
+  };
 }
 
 async function assertSingleInventoryAccount(
@@ -334,6 +424,14 @@ router.get("/ledger", authenticate, async (req: AuthenticatedRequest, res: Respo
           date: 1,
           reference: 1,
           description: 1,
+          source: 1,
+          sourceId: 1,
+          grossSubtotal: { $ifNull: ["$grossSubtotal", 0] },
+          discountAmount: { $ifNull: ["$discountAmount", 0] },
+          netAfterDiscount: { $ifNull: ["$netAfterDiscount", 0] },
+          gstAmount: { $ifNull: ["$gstAmount", 0] },
+          serviceChargeAmount: { $ifNull: ["$serviceChargeAmount", 0] },
+          grandTotal: { $ifNull: ["$grandTotal", 0] },
           note: "$lines.note",
           debit: "$lines.debit",
           credit: "$lines.credit",
@@ -345,7 +443,18 @@ router.get("/ledger", authenticate, async (req: AuthenticatedRequest, res: Respo
       },
     ]);
 
-    const totals = entries.reduce(
+    const invoiceLookup = await buildPosInvoiceLookup(
+      (entries as any[]).map((row) => ({
+        reference: row.reference,
+        sourceId: row.sourceId,
+      }))
+    );
+    const normalizedEntries = (entries as any[]).map((row) => ({
+      ...row,
+      ...getEntryBillingSnapshot(row, invoiceLookup),
+    }));
+
+    const totals = normalizedEntries.reduce(
       (acc, row) => {
         acc.debit += Number(row.debit || 0);
         acc.credit += Number(row.credit || 0);
@@ -356,7 +465,7 @@ router.get("/ledger", authenticate, async (req: AuthenticatedRequest, res: Respo
 
     return sendSuccess(res, {
       account: isAllAccounts ? null : selectedAccount,
-      entries,
+      entries: normalizedEntries,
       totals,
     });
   } catch (error) {
@@ -402,6 +511,14 @@ router.get("/accounts/:id/ledger", authenticate, async (req: AuthenticatedReques
           date: 1,
           reference: 1,
           description: 1,
+          source: 1,
+          sourceId: 1,
+          grossSubtotal: { $ifNull: ["$grossSubtotal", 0] },
+          discountAmount: { $ifNull: ["$discountAmount", 0] },
+          netAfterDiscount: { $ifNull: ["$netAfterDiscount", 0] },
+          gstAmount: { $ifNull: ["$gstAmount", 0] },
+          serviceChargeAmount: { $ifNull: ["$serviceChargeAmount", 0] },
+          grandTotal: { $ifNull: ["$grandTotal", 0] },
           note: "$lines.note",
           debit: "$lines.debit",
           credit: "$lines.credit",
@@ -409,7 +526,18 @@ router.get("/accounts/:id/ledger", authenticate, async (req: AuthenticatedReques
       },
     ]);
 
-    const totals = entries.reduce(
+    const invoiceLookup = await buildPosInvoiceLookup(
+      (entries as any[]).map((row) => ({
+        reference: row.reference,
+        sourceId: row.sourceId,
+      }))
+    );
+    const normalizedEntries = (entries as any[]).map((row) => ({
+      ...row,
+      ...getEntryBillingSnapshot(row, invoiceLookup),
+    }));
+
+    const totals = normalizedEntries.reduce(
       (acc, row) => {
         acc.debit += Number(row.debit || 0);
         acc.credit += Number(row.credit || 0);
@@ -420,7 +548,7 @@ router.get("/accounts/:id/ledger", authenticate, async (req: AuthenticatedReques
 
     return sendSuccess(res, {
       account,
-      entries,
+      entries: normalizedEntries,
       totals,
     });
   } catch (error) {
@@ -634,10 +762,28 @@ router.get("/journal", authenticate, async (req: AuthenticatedRequest, res: Resp
     await connectDB();
     const { dateFrom, dateTo } = req.query as Record<string, string>;
     const query: any = {};
-    if (dateFrom) query.date = { $gte: new Date(dateFrom) };
-    if (dateTo) query.date = { ...(query.date || {}), $lte: new Date(dateTo) };
+    if (dateFrom) {
+      const from = new Date(dateFrom);
+      from.setHours(0, 0, 0, 0);
+      query.date = { ...(query.date || {}), $gte: from };
+    }
+    if (dateTo) {
+      const to = new Date(dateTo);
+      to.setHours(23, 59, 59, 999);
+      query.date = { ...(query.date || {}), $lte: to };
+    }
     const entries = await JournalEntry.find(query).sort({ date: -1 }).lean();
-    return sendSuccess(res, entries);
+    const invoiceLookup = await buildPosInvoiceLookup(
+      (entries as any[]).map((entry) => ({
+        reference: entry.reference,
+        sourceId: entry.sourceId,
+      }))
+    );
+    const normalizedEntries = (entries as any[]).map((entry) => ({
+      ...entry,
+      ...getEntryBillingSnapshot(entry, invoiceLookup),
+    }));
+    return sendSuccess(res, normalizedEntries);
   } catch (error) {
     console.error("Accounting journal list error:", error);
     return sendError(res, "Failed to fetch journal entries", 500);

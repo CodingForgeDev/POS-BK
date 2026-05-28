@@ -478,6 +478,12 @@ export async function createJournalEntryRecord(payload: Record<string, unknown>)
     sourceId = null,
     postedBy = null,
     status = "posted",
+    grossSubtotal = 0,
+    discountAmount = 0,
+    netAfterDiscount = 0,
+    gstAmount = 0,
+    serviceChargeAmount = 0,
+    grandTotal = 0,
   } = payload;
   const session = (payload as { session?: ClientSession | null }).session ?? null;
 
@@ -561,6 +567,12 @@ export async function createJournalEntryRecord(payload: Record<string, unknown>)
       sourceId: sourceId || null,
       postedBy: status === "posted" ? postedBy || null : null,
       status,
+      grossSubtotal: Number(grossSubtotal || 0),
+      discountAmount: Number(discountAmount || 0),
+      netAfterDiscount: Number(netAfterDiscount || 0),
+      gstAmount: Number(gstAmount || 0),
+      serviceChargeAmount: Number(serviceChargeAmount || 0),
+      grandTotal: Number(grandTotal || 0),
     },
     session ? { session } : undefined
   )) as any;

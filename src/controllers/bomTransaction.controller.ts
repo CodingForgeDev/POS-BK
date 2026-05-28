@@ -212,32 +212,48 @@ async function buildProductionJournal(bom: any, session: mongoose.ClientSession 
     account: wipAccount._id,
     accountName: wipAccount.title,
     debit: 0,
-    credit: totalRawCost,
-    note: `Clear production account ${bom.transactionNo}`,
+    credit: totalProducedValue,
+    note: `Transfer production cost to finished goods ${bom.transactionNo}`,
   });
 
-  if (Math.abs(bom.variance || 0) > 0.001) {
-    if (bom.variance > 0) {
+  const varianceAmount = Number(bom.variance || 0);
+  if (Math.abs(varianceAmount) > 0.001) {
+    if (varianceAmount > 0) {
       if (!varianceFavourable) {
         throw new Error("Unable to resolve variance account.");
       }
       lines.push({
+        account: wipAccount._id,
+        accountName: wipAccount.title,
+        debit: varianceAmount,
+        credit: 0,
+        note: `Production variance adjustment ${bom.transactionNo}`,
+      });
+      lines.push({
         account: varianceFavourable._id,
         accountName: varianceFavourable.title,
         debit: 0,
-        credit: bom.variance,
+        credit: varianceAmount,
         note: `Favourable production variance ${bom.transactionNo}`,
       });
     } else {
       if (!varianceUnfavourable) {
         throw new Error("Unable to resolve variance account.");
       }
+      const unfavorableAmount = Math.abs(varianceAmount);
       lines.push({
         account: varianceUnfavourable._id,
         accountName: varianceUnfavourable.title,
-        debit: Math.abs(bom.variance),
+        debit: unfavorableAmount,
         credit: 0,
         note: `Unfavourable production variance ${bom.transactionNo}`,
+      });
+      lines.push({
+        account: wipAccount._id,
+        accountName: wipAccount.title,
+        debit: 0,
+        credit: unfavorableAmount,
+        note: `Production variance adjustment ${bom.transactionNo}`,
       });
     }
   }

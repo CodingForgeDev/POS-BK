@@ -256,13 +256,16 @@ async function postPOSOrderJournalEntry(
   if (!order || !invoice || !order._id) return;
 
   const total = Number(invoice.total || 0);
-  const subtotal = Number(order.subtotal || 0);
+  const subtotal = Number(invoice.subtotal ?? order.subtotal ?? 0);
   const taxAmount = Number(invoice.taxAmount || 0);
   const serviceChargeAmount = Number(invoice.serviceChargeAmount || 0);
   // invoice.discountAmount = order-level + billing-dialog discount (combined at checkout).
   // Must use invoice field so the debit side matches the already-reduced invoice.total.
   const discountAmount = Number(invoice.discountAmount ?? order.discountAmount ?? 0);
   const paymentAccountDiscountAmount = Number(invoice.paymentAccountDiscountAmount || 0);
+  const combinedDiscountAmount = discountAmount + paymentAccountDiscountAmount;
+  const netAfterDiscount = Math.max(0, subtotal - combinedDiscountAmount);
+  const grandTotal = netAfterDiscount + serviceChargeAmount + taxAmount;
   if (!total || total <= 0) return;
 
   const {
@@ -402,6 +405,12 @@ async function postPOSOrderJournalEntry(
       source: "POS",
       sourceId: order._id,
       postedBy: invoice.issuedBy || order.servedBy || null,
+      grossSubtotal: subtotal,
+      discountAmount: combinedDiscountAmount,
+      netAfterDiscount,
+      gstAmount: taxAmount,
+      serviceChargeAmount,
+      grandTotal,
       session,
     });
   } catch (err: any) {

@@ -38,6 +38,13 @@ const JournalEntrySchema = new mongoose.Schema(
     sourceId: { type: mongoose.Schema.Types.ObjectId, default: null },
     postedBy: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
     status: { type: String, enum: ["draft", "posted"], default: "posted" },
+    // Optional POS billing breakdown snapshot used by ledger/journal/report UIs.
+    grossSubtotal: { type: Number, default: 0 },
+    discountAmount: { type: Number, default: 0 },
+    netAfterDiscount: { type: Number, default: 0 },
+    gstAmount: { type: Number, default: 0 },
+    serviceChargeAmount: { type: Number, default: 0 },
+    grandTotal: { type: Number, default: 0 },
   },
   { timestamps: true }
 );

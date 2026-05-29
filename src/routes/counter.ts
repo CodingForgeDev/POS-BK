@@ -9,7 +9,7 @@ import {
   denomRecordToArray,
   postCounterCloseDeposit,
   postCounterDisbursement,
-  repairCounterCloseJournal,
+  syncCounterCloseAccounting,
 } from "../lib/counterPosting";
 
 const router: Router = Router();
@@ -180,44 +180,13 @@ router.get("/history", authenticate, async (req: AuthenticatedRequest, res: Resp
       .lean();
 
     let journalsRepaired = 0;
+    let referencesNormalized = 0;
     if (repairJournals === "1" || repairJournals === "true") {
-      const repairQuery: Record<string, unknown> = {
-        status: "closed",
-        closeJournalEntryId: null,
-        $or: [{ depositedAmount: { $gt: 0 } }, { netDeposit: { $gt: 0 } }],
-      };
-      if (!canViewAll) {
-        repairQuery.openedBy = userId;
-      }
-
-      const repairCandidates = await CounterSession.find(repairQuery)
-        .sort({ closedAt: 1 })
-        .limit(500)
-        .lean();
-
-      for (const session of repairCandidates) {
-        const deposited = roundMoney(session.depositedAmount ?? session.netDeposit ?? 0);
-        if (deposited <= 0) continue;
-        try {
-          const { journal, repaired } = await repairCounterCloseJournal(
-            session as Record<string, unknown>
-          );
-          if (repaired && journal?._id) {
-            await CounterSession.updateOne(
-              { _id: session._id },
-              { $set: { closeJournalEntryId: journal._id } }
-            );
-            journalsRepaired += 1;
-          } else if (journal?._id && !session.closeJournalEntryId) {
-            await CounterSession.updateOne(
-              { _id: session._id },
-              { $set: { closeJournalEntryId: journal._id } }
-            );
-          }
-        } catch (repairError) {
-          console.error("Counter close journal repair failed:", session._id, repairError);
-        }
-      }
+      const syncResult = await syncCounterCloseAccounting(
+        canViewAll ? undefined : userId
+      );
+      journalsRepaired = syncResult.journalsRepaired;
+      referencesNormalized = syncResult.referencesNormalized;
 
       if (journalsRepaired > 0) {
         sessions = await CounterSession.find(query)
@@ -247,6 +216,7 @@ router.get("/history", authenticate, async (req: AuthenticatedRequest, res: Resp
       sessions,
       cashiers,
       journalsRepaired,
+      referencesNormalized,
     });
   } catch (error) {
     console.error("Counter history error:", error);

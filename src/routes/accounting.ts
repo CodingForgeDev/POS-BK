@@ -22,6 +22,7 @@ import {
 import Invoice from "../models/Invoice";
 import Order from "../models/Order";
 import { isAdminOrManagerRoleName } from "../lib/role-utils";
+import { syncCounterCloseAccounting } from "../lib/counterPosting";
 
 async function applyPurchaseReturnInventoryDeduction(returnRecord: any, session: mongoose.ClientSession | null = null) {
   if (!returnRecord || String(returnRecord.returnType).trim().toLowerCase() !== "purchase") {
@@ -367,6 +368,7 @@ router.get("/accounts", authenticate, async (req: AuthenticatedRequest, res: Res
 router.get("/ledger", authenticate, async (req: AuthenticatedRequest, res: Response) => {
   try {
     await connectDB();
+    await syncCounterCloseAccounting();
     const { accountId, dateFrom, dateTo } = req.query as Record<string, string>;
     const isAllAccounts = !accountId || accountId === "all";
     let selectedAccount: any = null;
@@ -477,6 +479,7 @@ router.get("/ledger", authenticate, async (req: AuthenticatedRequest, res: Respo
 router.get("/accounts/:id/ledger", authenticate, async (req: AuthenticatedRequest, res: Response) => {
   try {
     await connectDB();
+    await syncCounterCloseAccounting();
     const { id } = req.params;
     const { dateFrom, dateTo } = req.query as Record<string, string>;
 

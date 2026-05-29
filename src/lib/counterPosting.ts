@@ -1,5 +1,6 @@
 import mongoose from "mongoose";
 import JournalEntry from "../models/JournalEntry";
+import CounterSession from "../models/CounterSession";
 import {
   createJournalEntryRecord,
   resolveExpenseDebitAccount,
@@ -44,6 +45,26 @@ function denomRecordToArray(
   }));
 }
 
+function formatCounterCloseReference(closedAt: Date, seq: number): string {
+  const dateStr = closedAt.toISOString().slice(0, 10).replace(/-/g, "");
+  const width = Math.max(4, String(seq).length);
+  return `COUNTER-CLOSE-${dateStr}-${String(seq).padStart(width, "0")}`;
+}
+
+export function resolveSessionDepositAmount(session: Record<string, unknown>): number {
+  const explicit = roundToCents(Number(session.depositedAmount ?? session.netDeposit ?? NaN));
+  if (Number.isFinite(explicit) && explicit > 0) return explicit;
+
+  const counted = roundToCents(Number(session.countedTotal || 0));
+  const opening = roundToCents(
+    Number(session.tomorrowOpening ?? session.openingBalance ?? 0)
+  );
+  if (counted > 0) {
+    return roundToCents(Math.max(0, counted - opening));
+  }
+  return 0;
+}
+
 /** Global sequential counter-close reference: COUNTER-CLOSE-YYYYMMDD-0001 (never resets daily). */
 export async function allocateCounterCloseReference(closedAt: Date): Promise<string> {
   const entries = await JournalEntry.find({ source: "COUNTER_CLOSE" })
@@ -56,15 +77,89 @@ export async function allocateCounterCloseReference(closedAt: Date): Promise<str
     const match = ref.match(/^COUNTER-CLOSE-\d{8}-(\d+)$/);
     if (!match) continue;
     const suffix = match[1];
-    // Skip legacy timestamp suffixes (13-digit epoch ms)
     if (suffix.length > 6) continue;
     maxSeq = Math.max(maxSeq, Number.parseInt(suffix, 10));
   }
 
-  const nextSeq = maxSeq + 1;
-  const dateStr = closedAt.toISOString().slice(0, 10).replace(/-/g, "");
-  const width = Math.max(4, String(nextSeq).length);
-  return `COUNTER-CLOSE-${dateStr}-${String(nextSeq).padStart(width, "0")}`;
+  return formatCounterCloseReference(closedAt, maxSeq + 1);
+}
+
+/** Renumber all counter-close journals to global sequential refs ordered by close date. */
+export async function normalizeCounterCloseReferences(): Promise<number> {
+  const entries = await JournalEntry.find({ source: "COUNTER_CLOSE" })
+    .sort({ date: 1, _id: 1 })
+    .select("_id reference date")
+    .lean();
+
+  let updated = 0;
+  let seq = 0;
+  for (const entry of entries) {
+    seq += 1;
+    const expected = formatCounterCloseReference(new Date(entry.date as Date), seq);
+    if (String(entry.reference || "") !== expected) {
+      await JournalEntry.updateOne({ _id: entry._id }, { $set: { reference: expected } });
+      updated += 1;
+    }
+  }
+  return updated;
+}
+
+/** Backfill missing bank journals for all closed counter sessions with a deposit. */
+export async function repairAllMissingCounterCloseJournals(
+  filterOpenedBy?: string
+): Promise<number> {
+  const query: Record<string, unknown> = {
+    status: "closed",
+    closeJournalEntryId: null,
+  };
+  if (filterOpenedBy) {
+    query.openedBy = filterOpenedBy;
+  }
+
+  const sessions = await CounterSession.find(query)
+    .sort({ closedAt: 1 })
+    .limit(500)
+    .lean();
+
+  let repaired = 0;
+  for (const session of sessions) {
+    const deposited = resolveSessionDepositAmount(session as Record<string, unknown>);
+    if (deposited <= 0) continue;
+
+    try {
+      const { journal, repaired: didRepair } = await repairCounterCloseJournal({
+        ...(session as Record<string, unknown>),
+        depositedAmount: deposited,
+        netDeposit: deposited,
+      });
+
+      if (journal?._id) {
+        await CounterSession.updateOne(
+          { _id: session._id },
+          {
+            $set: {
+              closeJournalEntryId: journal._id,
+              depositedAmount: deposited,
+              netDeposit: deposited,
+            },
+          }
+        );
+        if (didRepair) repaired += 1;
+      }
+    } catch (error) {
+      console.error("Counter close journal repair failed:", session._id, error);
+    }
+  }
+
+  return repaired;
+}
+
+export async function syncCounterCloseAccounting(
+  filterOpenedBy?: string
+): Promise<{ journalsRepaired: number; referencesNormalized: number }> {
+  const journalsRepaired = await repairAllMissingCounterCloseJournals(filterOpenedBy);
+  const referencesNormalized = await normalizeCounterCloseReferences();
+  return { journalsRepaired, referencesNormalized };
 }
 
 /**
@@ -92,9 +187,7 @@ export async function repairCounterCloseJournal(
     return { journal: existing, repaired: false };
   }
 
-  const deposited = roundToCents(
-    Number(session.depositedAmount ?? session.netDeposit ?? 0)
-  );
+  const deposited = resolveSessionDepositAmount(session);
   if (deposited <= 0) {
     return { journal: null, repaired: false };
   }

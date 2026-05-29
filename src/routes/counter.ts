@@ -9,6 +9,7 @@ import {
   denomRecordToArray,
   postCounterCloseDeposit,
   postCounterDisbursement,
+  repairCounterCloseJournal,
 } from "../lib/counterPosting";
 
 const router: Router = Router();
@@ -149,7 +150,7 @@ router.get("/history", authenticate, async (req: AuthenticatedRequest, res: Resp
     await connectDB();
     const userId = currentUserId(req);
     const canViewAll = roleCanViewAllCounters(req.user?.role);
-    const { dateFrom, dateTo, cashier } = req.query as Record<string, string>;
+    const { dateFrom, dateTo, cashier, repairJournals } = req.query as Record<string, string>;
 
     const query: Record<string, unknown> = { status: "closed" };
     if (!canViewAll) {
@@ -173,10 +174,58 @@ router.get("/history", authenticate, async (req: AuthenticatedRequest, res: Resp
       query.closedAt = closedAtQuery;
     }
 
-    const sessions = await CounterSession.find(query)
+    let sessions = await CounterSession.find(query)
       .sort({ closedAt: -1 })
       .limit(300)
       .lean();
+
+    let journalsRepaired = 0;
+    if (repairJournals === "1" || repairJournals === "true") {
+      const repairQuery: Record<string, unknown> = {
+        status: "closed",
+        closeJournalEntryId: null,
+        $or: [{ depositedAmount: { $gt: 0 } }, { netDeposit: { $gt: 0 } }],
+      };
+      if (!canViewAll) {
+        repairQuery.openedBy = userId;
+      }
+
+      const repairCandidates = await CounterSession.find(repairQuery)
+        .sort({ closedAt: 1 })
+        .limit(500)
+        .lean();
+
+      for (const session of repairCandidates) {
+        const deposited = roundMoney(session.depositedAmount ?? session.netDeposit ?? 0);
+        if (deposited <= 0) continue;
+        try {
+          const { journal, repaired } = await repairCounterCloseJournal(
+            session as Record<string, unknown>
+          );
+          if (repaired && journal?._id) {
+            await CounterSession.updateOne(
+              { _id: session._id },
+              { $set: { closeJournalEntryId: journal._id } }
+            );
+            journalsRepaired += 1;
+          } else if (journal?._id && !session.closeJournalEntryId) {
+            await CounterSession.updateOne(
+              { _id: session._id },
+              { $set: { closeJournalEntryId: journal._id } }
+            );
+          }
+        } catch (repairError) {
+          console.error("Counter close journal repair failed:", session._id, repairError);
+        }
+      }
+
+      if (journalsRepaired > 0) {
+        sessions = await CounterSession.find(query)
+          .sort({ closedAt: -1 })
+          .limit(300)
+          .lean();
+      }
+    }
 
     let cashiers: string[] = [];
     if (canViewAll) {
@@ -197,6 +246,7 @@ router.get("/history", authenticate, async (req: AuthenticatedRequest, res: Resp
     return sendSuccess(res, {
       sessions,
       cashiers,
+      journalsRepaired,
     });
   } catch (error) {
     console.error("Counter history error:", error);

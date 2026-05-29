@@ -1,4 +1,5 @@
 import mongoose from "mongoose";
+import JournalEntry from "../models/JournalEntry";
 import {
   createJournalEntryRecord,
   resolveExpenseDebitAccount,
@@ -43,6 +44,78 @@ function denomRecordToArray(
   }));
 }
 
+/** Global sequential counter-close reference: COUNTER-CLOSE-YYYYMMDD-0001 (never resets daily). */
+export async function allocateCounterCloseReference(closedAt: Date): Promise<string> {
+  const entries = await JournalEntry.find({ source: "COUNTER_CLOSE" })
+    .select("reference")
+    .lean();
+
+  let maxSeq = 0;
+  for (const entry of entries) {
+    const ref = String(entry.reference || "");
+    const match = ref.match(/^COUNTER-CLOSE-\d{8}-(\d+)$/);
+    if (!match) continue;
+    const suffix = match[1];
+    // Skip legacy timestamp suffixes (13-digit epoch ms)
+    if (suffix.length > 6) continue;
+    maxSeq = Math.max(maxSeq, Number.parseInt(suffix, 10));
+  }
+
+  const nextSeq = maxSeq + 1;
+  const dateStr = closedAt.toISOString().slice(0, 10).replace(/-/g, "");
+  const width = Math.max(4, String(nextSeq).length);
+  return `COUNTER-CLOSE-${dateStr}-${String(nextSeq).padStart(width, "0")}`;
+}
+
+/**
+ * Creates the bank deposit journal for a closed counter session that never received one
+ * (e.g. journal failed after session save, or legacy closes before accounting integration).
+ */
+export async function repairCounterCloseJournal(
+  session: Record<string, unknown>
+): Promise<{ journal: any | null; repaired: boolean }> {
+  const sessionId = String(session._id || "");
+  if (!sessionId || session.closeJournalEntryId) {
+    return { journal: null, repaired: false };
+  }
+
+  if (!mongoose.Types.ObjectId.isValid(sessionId)) {
+    return { journal: null, repaired: false };
+  }
+
+  const sourceObjectId = new mongoose.Types.ObjectId(sessionId);
+  const existing = await JournalEntry.findOne({
+    source: "COUNTER_CLOSE",
+    sourceId: sourceObjectId,
+  }).lean();
+  if (existing) {
+    return { journal: existing, repaired: false };
+  }
+
+  const deposited = roundToCents(
+    Number(session.depositedAmount ?? session.netDeposit ?? 0)
+  );
+  if (deposited <= 0) {
+    return { journal: null, repaired: false };
+  }
+
+  const closedAt = session.closedAt ? new Date(session.closedAt as Date) : new Date();
+  const openedAt = session.openedAt ? new Date(session.openedAt as Date) : closedAt;
+
+  const journal = await postCounterCloseDeposit({
+    countedTotal: Number(session.countedTotal || 0),
+    openingBalance: Number(session.openingBalance ?? session.tomorrowOpening ?? 0),
+    depositedAmount: deposited,
+    remarks: String(session.remarks || ""),
+    closedAt,
+    counterOpenedAt: openedAt,
+    postedBy: String(session.closedBy || ""),
+    sessionId,
+  });
+
+  return { journal, repaired: Boolean(journal?._id) };
+}
+
 /**
  * Posts counter close deposit: physical count minus opening float left in drawer.
  * Dr Bank, Cr Cash on Hand for net deposited amount.
@@ -69,7 +142,7 @@ export async function postCounterCloseDeposit(
     );
   }
 
-  const reference = `COUNTER-CLOSE-${payload.closedAt.toISOString().slice(0, 10).replace(/-/g, "")}-${Date.now()}`;
+  const reference = await allocateCounterCloseReference(payload.closedAt);
   const remarkNote = payload.remarks?.trim() ? ` — ${payload.remarks.trim()}` : "";
   const description =
     `Counter close: deposit ${deposited} (counted ${roundToCents(payload.countedTotal)}, ` +

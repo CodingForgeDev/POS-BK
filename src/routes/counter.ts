@@ -16,6 +16,23 @@ const router: Router = Router();
 const roundMoney = (v: unknown) => Number(Number(v || 0).toFixed(2));
 const roleCanDisburse = (role: unknown) =>
   ["admin", "manager"].includes(String(role || "").trim().toLowerCase());
+const roleCanViewAllCounters = (role: unknown) =>
+  ["admin", "manager"].includes(String(role || "").trim().toLowerCase());
+
+const currentUserId = (req: AuthenticatedRequest) => String(req.user?.id || "");
+
+const toOwnerId = (userId: string) =>
+  mongoose.Types.ObjectId.isValid(userId) ? new mongoose.Types.ObjectId(userId) : userId;
+
+const ownedOpenQuery = (userId: string) => ({
+  status: "open" as const,
+  openedBy: toOwnerId(userId),
+});
+
+const ownedClosedQuery = (userId: string) => ({
+  status: "closed" as const,
+  openedBy: toOwnerId(userId),
+});
 
 type DisbursementRow = {
   amount: number;
@@ -79,15 +96,33 @@ async function hydrateOpenSession(session: Record<string, unknown> | null) {
 router.get("/status", authenticate, async (req: AuthenticatedRequest, res: Response) => {
   try {
     await connectDB();
-    const openSessionRaw = await CounterSession.findOne({ status: "open" })
+    const userId = currentUserId(req);
+
+    const openSessionRaw = await CounterSession.findOne(ownedOpenQuery(userId))
       .sort({ openedAt: -1 })
       .lean();
 
     const openSession = await hydrateOpenSession(openSessionRaw as Record<string, unknown> | null);
 
-    const lastClosed = await CounterSession.findOne({ status: "closed" })
+    const lastClosed = await CounterSession.findOne(ownedClosedQuery(userId))
       .sort({ closedAt: -1 })
       .lean();
+
+    let otherOpenSessions: Array<Record<string, unknown>> = [];
+    if (roleCanViewAllCounters(req.user?.role)) {
+      const others = await CounterSession.find({
+        status: "open",
+        openedBy: { $ne: userId },
+      })
+        .sort({ openedAt: -1 })
+        .lean();
+      otherOpenSessions = others.map((s) => ({
+        _id: s._id,
+        openedAt: s.openedAt,
+        cashierName: s.cashierName || "",
+        openedBy: s.openedBy,
+      }));
+    }
 
     return sendSuccess(res, {
       openSession: openSession || null,
@@ -100,10 +135,72 @@ router.get("/status", authenticate, async (req: AuthenticatedRequest, res: Respo
             setAt: lastClosed.closedAt,
           }
         : null,
+      otherOpenSessions,
     });
   } catch (error) {
     console.error("Counter status error:", error);
     return sendError(res, "Failed to load counter status", 500);
+  }
+});
+
+/** Closed counter sessions for Old Revenue Book (per-user; admin/manager sees all). */
+router.get("/history", authenticate, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    await connectDB();
+    const userId = currentUserId(req);
+    const canViewAll = roleCanViewAllCounters(req.user?.role);
+    const { dateFrom, dateTo, cashier } = req.query as Record<string, string>;
+
+    const query: Record<string, unknown> = { status: "closed" };
+    if (!canViewAll) {
+      query.openedBy = userId;
+    } else if (cashier && String(cashier).trim()) {
+      query.cashierName = String(cashier).trim();
+    }
+
+    const closedAtQuery: Record<string, Date> = {};
+    if (dateFrom) {
+      const from = new Date(dateFrom);
+      from.setHours(0, 0, 0, 0);
+      if (!Number.isNaN(from.getTime())) closedAtQuery.$gte = from;
+    }
+    if (dateTo) {
+      const to = new Date(dateTo);
+      to.setHours(23, 59, 59, 999);
+      if (!Number.isNaN(to.getTime())) closedAtQuery.$lte = to;
+    }
+    if (Object.keys(closedAtQuery).length) {
+      query.closedAt = closedAtQuery;
+    }
+
+    const sessions = await CounterSession.find(query)
+      .sort({ closedAt: -1 })
+      .limit(300)
+      .lean();
+
+    let cashiers: string[] = [];
+    if (canViewAll) {
+      const fromSessions = await CounterSession.distinct("cashierName", {
+        status: "closed",
+        cashierName: { $ne: "" },
+      });
+      const fromOpen = await CounterSession.distinct("cashierName", {
+        status: "open",
+        cashierName: { $ne: "" },
+      });
+      cashiers = [...fromSessions, ...fromOpen]
+        .map((name) => String(name || "").trim())
+        .filter(Boolean);
+      cashiers = [...new Set(cashiers)].sort();
+    }
+
+    return sendSuccess(res, {
+      sessions,
+      cashiers,
+    });
+  } catch (error) {
+    console.error("Counter history error:", error);
+    return sendError(res, "Failed to load counter history", 500);
   }
 });
 
@@ -161,16 +258,86 @@ router.post("/close", authenticate, async (req: AuthenticatedRequest, res: Respo
       return sendError(res, "Invalid counter session timestamps", 400);
     }
 
+    const userId = currentUserId(req);
     let session = sessionId
-      ? await CounterSession.findOne({ _id: sessionId, status: "open" })
-      : await CounterSession.findOne({ status: "open" }).sort({ openedAt: -1 });
+      ? await CounterSession.findOne({ _id: sessionId, status: "open", openedBy: userId })
+      : await CounterSession.findOne(ownedOpenQuery(userId)).sort({ openedAt: -1 });
+
     if (!session) {
-      session = new CounterSession({
-        status: "open",
-        openedAt,
-        openedBy: req.user?.id,
-        cashierName: String(cashierName || req.user?.name || ""),
-      });
+      if (sessionId) {
+        const alreadyClosed = await CounterSession.findOne({
+          _id: sessionId,
+          status: "closed",
+          openedBy: toOwnerId(userId),
+        });
+        if (alreadyClosed) {
+          return sendSuccess(
+            res,
+            {
+              session: alreadyClosed.toObject(),
+              countedTotal: alreadyClosed.countedTotal,
+              openingBalance: alreadyClosed.openingBalance,
+              depositedAmount: alreadyClosed.depositedAmount,
+              tomorrowOpening: alreadyClosed.tomorrowOpening,
+              netDeposit: alreadyClosed.netDeposit,
+              difference: alreadyClosed.difference,
+              cashSales: alreadyClosed.cashSales,
+              cardSales: alreadyClosed.cardSales,
+              bankTransferSales: alreadyClosed.bankTransferSales,
+              disbursements: alreadyClosed.disbursements || [],
+              remarks: alreadyClosed.remarks,
+              journalEntryId: alreadyClosed.closeJournalEntryId || null,
+              pendingOpeningBalance: {
+                total: Number(alreadyClosed.openingBalance || 0),
+                denominations: alreadyClosed.openingDenominations || [],
+                remarks: alreadyClosed.remarks || "",
+                setAt: alreadyClosed.closedAt,
+              },
+            },
+            "Counter already closed",
+            200
+          );
+        }
+      }
+
+      const lastClosed = await CounterSession.findOne(ownedClosedQuery(userId))
+        .sort({ closedAt: -1 })
+        .lean();
+      if (lastClosed?.closedAt && !Number.isNaN(closedAtDate.getTime())) {
+        const deltaMs = Math.abs(
+          new Date(lastClosed.closedAt).getTime() - closedAtDate.getTime()
+        );
+        if (deltaMs < 2 * 60 * 1000) {
+          return sendSuccess(
+            res,
+            {
+              session: lastClosed,
+              countedTotal: lastClosed.countedTotal,
+              openingBalance: lastClosed.openingBalance,
+              depositedAmount: lastClosed.depositedAmount,
+              tomorrowOpening: lastClosed.tomorrowOpening,
+              netDeposit: lastClosed.netDeposit,
+              difference: lastClosed.difference,
+              cashSales: lastClosed.cashSales,
+              cardSales: lastClosed.cardSales,
+              bankTransferSales: lastClosed.bankTransferSales,
+              disbursements: lastClosed.disbursements || [],
+              remarks: lastClosed.remarks,
+              journalEntryId: lastClosed.closeJournalEntryId || null,
+              pendingOpeningBalance: {
+                total: Number(lastClosed.openingBalance || 0),
+                denominations: lastClosed.openingDenominations || [],
+                remarks: lastClosed.remarks || "",
+                setAt: lastClosed.closedAt,
+              },
+            },
+            "Counter already closed",
+            200
+          );
+        }
+      }
+
+      return sendError(res, "No open counter session found for your account. Open your counter first.", 404);
     }
 
     session.status = "closed";
@@ -267,9 +434,10 @@ router.post("/open", authenticate, async (req: AuthenticatedRequest, res: Respon
   try {
     await connectDB();
 
-    const existingOpen = await CounterSession.findOne({ status: "open" });
+    const userId = currentUserId(req);
+    const existingOpen = await CounterSession.findOne(ownedOpenQuery(userId));
     if (existingOpen) {
-      return sendError(res, "A counter session is already open", 409);
+      return sendError(res, "Your counter session is already open", 409);
     }
 
     const { openedAt, cashierName = "" } = req.body || {};
@@ -278,7 +446,7 @@ router.post("/open", authenticate, async (req: AuthenticatedRequest, res: Respon
       return sendError(res, "Invalid open timestamp", 400);
     }
 
-    const lastClosed = await CounterSession.findOne({ status: "closed" })
+    const lastClosed = await CounterSession.findOne(ownedClosedQuery(userId))
       .sort({ closedAt: -1 })
       .lean();
 
@@ -329,20 +497,21 @@ router.post("/disburse", authenticate, async (req: AuthenticatedRequest, res: Re
     if (amount <= 0) return sendError(res, "Amount must be greater than zero", 400);
     if (!cleanedRemarks) return sendError(res, "Remarks are required", 400);
 
+    const userId = currentUserId(req);
     let session = sessionId
-      ? await CounterSession.findOne({ _id: sessionId, status: "open" })
-      : await CounterSession.findOne({ status: "open" }).sort({ openedAt: -1 });
+      ? await CounterSession.findOne({ _id: sessionId, status: "open", openedBy: userId })
+      : await CounterSession.findOne(ownedOpenQuery(userId)).sort({ openedAt: -1 });
 
     if (!session && counterOpenedAt) {
       const openedAtDate = new Date(counterOpenedAt);
       if (!Number.isNaN(openedAtDate.getTime())) {
-        const lastClosed = await CounterSession.findOne({ status: "closed" })
+        const lastClosed = await CounterSession.findOne(ownedClosedQuery(userId))
           .sort({ closedAt: -1 })
           .lean();
         session = await CounterSession.create({
           status: "open",
           openedAt: openedAtDate,
-          openedBy: req.user?.id,
+          openedBy: userId,
           cashierName: String(req.user?.name || ""),
           sessionOpeningBalance: roundMoney(
             lastClosed?.tomorrowOpening || lastClosed?.openingBalance || 0
@@ -353,7 +522,9 @@ router.post("/disburse", authenticate, async (req: AuthenticatedRequest, res: Re
       }
     }
 
-    if (!session) return sendError(res, "No open counter session found", 404);
+    if (!session) {
+      return sendError(res, "No open counter session found for your account", 404);
+    }
 
     if (cashSales !== undefined) session.cashSales = roundMoney(cashSales);
     if (cardSales !== undefined) session.cardSales = roundMoney(cardSales);

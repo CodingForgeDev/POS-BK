@@ -96,6 +96,8 @@ const CounterSessionSchema = new mongoose.Schema(
 );
 
 CounterSessionSchema.index({ status: 1, openedAt: -1 });
+CounterSessionSchema.index({ status: 1, openedBy: 1, openedAt: -1 });
+CounterSessionSchema.index({ status: 1, openedBy: 1, closedAt: -1 });
 CounterSessionSchema.index({ closedAt: -1 });
 
 if (mongoose.models.CounterSession) {

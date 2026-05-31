@@ -5,6 +5,7 @@ import Inventory from "../models/Inventory";
 import Invoice from "../models/Invoice";
 import InventoryConsumption from "../models/InventoryConsumption";
 import InventoryReservation from "../models/InventoryReservation";
+import StockLayer from "../models/StockLayer";
 import { InsufficientStockError } from "./inventoryErrors";
 import { deductInventoryFifo, type FifoAllocation } from "./inventoryFifo";
 import {
@@ -696,5 +697,60 @@ export async function executeBillingWithRecipeConsumption(input: BillingRecipeIn
     throw e;
   } finally {
     session.endSession();
+  }
+}
+
+/**
+ * Restocks inventory consumed by a POS order when a refund is processed.
+ *
+ * Looks up the InventoryConsumption record for the invoice and adds back
+ * `proportion` of each consumed inventory item (1 = full refund, < 1 = partial).
+ * Creates a StockLayer "return" entry and increments Inventory.currentStock.
+ *
+ * Safe to call even if no consumption record exists (products without recipes).
+ */
+export async function restockInventoryForRefund(
+  invoiceId: string,
+  proportion: number,
+  postedBy: string | null
+): Promise<void> {
+  if (proportion <= 0) return;
+  const safeId = String(invoiceId).trim();
+  if (!mongoose.Types.ObjectId.isValid(safeId)) return;
+
+  const consumption = await InventoryConsumption.findOne({
+    invoice: new mongoose.Types.ObjectId(safeId),
+  }).lean() as any;
+
+  if (!consumption?.lines?.length) return;
+
+  for (const line of consumption.lines as any[]) {
+    const raw = Number(line.quantityConsumed || 0);
+    if (!(raw > 0)) continue;
+
+    const qty = Math.round(raw * proportion * 10000) / 10000;
+    if (!(qty > 0)) continue;
+
+    const invId = new mongoose.Types.ObjectId(String(line.inventoryItem));
+    const inv = await Inventory.findById(invId).select("costPerUnit").lean() as any;
+    if (!inv) continue;
+
+    await StockLayer.create([{
+      sourceType: "return",
+      purchase: null,
+      lineIndex: 0,
+      inventoryItem: invId,
+      supplier: null,
+      createdBy: postedBy && mongoose.Types.ObjectId.isValid(postedBy)
+        ? new mongoose.Types.ObjectId(postedBy)
+        : null,
+      adjustmentType: "add",
+      receivedAt: new Date(),
+      quantityOriginal: qty,
+      quantityRemaining: qty,
+      unitCost: Number(inv.costPerUnit) || 0,
+    }]);
+
+    await Inventory.updateOne({ _id: invId }, { $inc: { currentStock: qty } });
   }
 }

@@ -114,5 +114,8 @@ const InvoiceSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
+// Prevent duplicate invoices for the same order (covers billing race conditions).
+InvoiceSchema.index({ order: 1 }, { unique: true });
+
 export default (mongoose.models.Invoice ||
   mongoose.model("Invoice", InvoiceSchema)) as mongoose.Model<any>;

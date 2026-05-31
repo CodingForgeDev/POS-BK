@@ -13,6 +13,7 @@ import { reverseJournalEntryRecord, createSaleReturnJournalReversal } from "../l
 import {
   executeBillingWithRecipeConsumption,
   InsufficientStockError,
+  restockInventoryForRefund,
 } from "../lib/recipeInventory";
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -521,6 +522,8 @@ router.post(
         { runValidators: false }
       );
 
+      const refundProportion = invoice.total > 0 ? approvedAmount / invoice.total : 0;
+
       if (newStatus === "refunded") {
         const updatedInvoice = await Invoice.findById(id).lean();
         if (updatedInvoice) {
@@ -530,7 +533,6 @@ router.post(
         // For partial refunds, reverse journal entry proportionally
         const updatedInvoice = await Invoice.findById(id).lean();
         if (updatedInvoice) {
-          const refundProportion = approvedAmount / invoice.total;
           const originalSale = (await JournalEntry.findOne({ source: "POS", sourceId: invoice.order }).lean()) as any;
           if (originalSale) {
             const reversalReference = `REV-${String(originalSale.reference || originalSale._id)}-PARTIAL`;
@@ -546,6 +548,12 @@ router.post(
           }
         }
       }
+
+      // Return consumed inventory proportional to the refund amount.
+      // Full refund: proportion = 1 (all items back). Partial: proportional to refund value.
+      await restockInventoryForRefund(String(id), refundProportion, req.user.id).catch((err) => {
+        console.error("[refund-approve] inventory restock failed (non-fatal):", err?.message);
+      });
 
       return sendSuccess(
         res,
@@ -645,6 +653,10 @@ router.post(
       await invoice.save();
 
       await reverseSaleJournalForInvoice(invoice, req.user.id);
+      // Return all consumed inventory back to stock (full refund = proportion 1)
+      await restockInventoryForRefund(String(invoice._id), 1, req.user.id).catch((err) => {
+        console.error("[refund] inventory restock failed (non-fatal):", err?.message);
+      });
 
       return sendSuccess(
         res,
@@ -794,6 +806,13 @@ router.post("/", authenticate, async (req: AuthenticatedRequest, res: Response) 
         lastError = e;
         const isDuplicate =
           e instanceof Error && /E11000 duplicate key error.*invoiceNumber/i.test(e.message);
+        // Duplicate invoice for the same order — unique index on Invoice.order fired.
+        // This happens when two concurrent billing requests race; the second must be rejected.
+        const isDuplicateOrder =
+          e instanceof Error && /E11000 duplicate key error.*\border\b/i.test(e.message);
+        if (isDuplicateOrder) {
+          return sendError(res, "Order already billed", 400);
+        }
         if (!isDuplicate) {
           if (e instanceof InsufficientStockError) {
             return sendError(res, e.message, 409, { code: e.code, shortages: e.shortages });

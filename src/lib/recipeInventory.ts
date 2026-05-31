@@ -6,6 +6,7 @@ import Invoice from "../models/Invoice";
 import InventoryConsumption from "../models/InventoryConsumption";
 import InventoryReservation from "../models/InventoryReservation";
 import StockLayer from "../models/StockLayer";
+import WasteLog from "../models/WasteLog";
 import { InsufficientStockError } from "./inventoryErrors";
 import { deductInventoryFifo, type FifoAllocation } from "./inventoryFifo";
 import {
@@ -701,56 +702,126 @@ export async function executeBillingWithRecipeConsumption(input: BillingRecipeIn
 }
 
 /**
- * Restocks inventory consumed by a POS order when a refund is processed.
+ * Processes inventory impact when a POS refund is approved.
  *
- * Looks up the InventoryConsumption record for the invoice and adds back
- * `proportion` of each consumed inventory item (1 = full refund, < 1 = partial).
- * Creates a StockLayer "return" entry and increments Inventory.currentStock.
+ * Behaviour depends on the item type stored on each order line:
  *
- * Safe to call even if no consumption record exists (products without recipes).
+ *  • isReadyItem = true  (packaged/pre-made goods — cake, canned drink, biscuit)
+ *    → Ingredients/stock added back via the product's recipe lines.
+ *      These items can be returned to the shelf, so inventory is restored.
+ *
+ *  • isReadyItem = false (made-to-order — burger, milkshake, pizza)
+ *    → Ingredients are already consumed during preparation.
+ *      A WasteLog entry is created instead; no inventory reversal.
+ *      This keeps COGS accurate and feeds the manager waste report.
+ *
+ * @param invoiceId     - The Invoice._id being refunded.
+ * @param refundItems   - Items from refundRequest (partial refund) or null (full refund).
+ * @param postedBy      - User ID of the person who approved the refund.
  */
 export async function restockInventoryForRefund(
   invoiceId: string,
-  proportion: number,
+  refundItems: Array<{ name: string; refundQuantity?: number; quantity?: number }> | null,
   postedBy: string | null
 ): Promise<void> {
-  if (proportion <= 0) return;
   const safeId = String(invoiceId).trim();
   if (!mongoose.Types.ObjectId.isValid(safeId)) return;
 
-  const consumption = await InventoryConsumption.findOne({
-    invoice: new mongoose.Types.ObjectId(safeId),
-  }).lean() as any;
+  const invoice = await Invoice.findById(safeId).lean() as any;
+  if (!invoice?.order) return;
 
-  if (!consumption?.lines?.length) return;
+  const order = await Order.findById(String(invoice.order)).lean() as any;
+  if (!order?.items?.length) return;
 
-  for (const line of consumption.lines as any[]) {
-    const raw = Number(line.quantityConsumed || 0);
-    if (!(raw > 0)) continue;
+  const createdByOid =
+    postedBy && mongoose.Types.ObjectId.isValid(postedBy)
+      ? new mongoose.Types.ObjectId(postedBy)
+      : null;
 
-    const qty = Math.round(raw * proportion * 10000) / 10000;
-    if (!(qty > 0)) continue;
+  // Build the list of (orderItem, qty) pairs to process
+  const toProcess: Array<{ orderItem: any; refundQty: number }> = [];
 
-    const invId = new mongoose.Types.ObjectId(String(line.inventoryItem));
-    const inv = await Inventory.findById(invId).select("costPerUnit").lean() as any;
-    if (!inv) continue;
+  if (!refundItems) {
+    // Full refund — every item in the order
+    for (const item of order.items as any[]) {
+      toProcess.push({ orderItem: item, refundQty: Number(item.quantity || 0) });
+    }
+  } else {
+    // Partial — match each refund line to an order item by name
+    for (const ri of refundItems) {
+      const match = (order.items as any[]).find(
+        (oi: any) =>
+          String(oi.name || "").trim().toLowerCase() ===
+          String(ri.name || "").trim().toLowerCase()
+      );
+      if (!match) continue;
+      const qty = Math.min(
+        Number(ri.refundQuantity ?? ri.quantity ?? 0),
+        Number(match.quantity || 0)
+      );
+      if (qty > 0) toProcess.push({ orderItem: match, refundQty: qty });
+    }
+  }
 
-    await StockLayer.create([{
-      sourceType: "return",
-      purchase: null,
-      lineIndex: 0,
-      inventoryItem: invId,
-      supplier: null,
-      createdBy: postedBy && mongoose.Types.ObjectId.isValid(postedBy)
-        ? new mongoose.Types.ObjectId(postedBy)
-        : null,
-      adjustmentType: "add",
-      receivedAt: new Date(),
-      quantityOriginal: qty,
-      quantityRemaining: qty,
-      unitCost: Number(inv.costPerUnit) || 0,
-    }]);
+  for (const { orderItem, refundQty } of toProcess) {
+    if (!(refundQty > 0)) continue;
 
-    await Inventory.updateOne({ _id: invId }, { $inc: { currentStock: qty } });
+    // Fetch product to get isReadyItem flag, recipe lines, and cost
+    const product = orderItem.product
+      ? (await Product.findById(String(orderItem.product))
+          .select("isReadyItem recipeLines costPrice")
+          .lean() as any)
+      : null;
+
+    const isReady =
+      Boolean(orderItem.isReadyItem) || Boolean(product?.isReadyItem);
+
+    if (isReady) {
+      // ── Ready/packaged item → restock ingredient inventory ──────────────
+      const recipeLines: any[] = product?.recipeLines ?? [];
+      for (const line of recipeLines) {
+        const qty =
+          Math.round(Number(line.quantityPerUnit || 0) * refundQty * 10000) / 10000;
+        if (!(qty > 0)) continue;
+
+        const invId = new mongoose.Types.ObjectId(String(line.inventoryItem));
+        const inv = await Inventory.findById(invId)
+          .select("costPerUnit")
+          .lean() as any;
+        if (!inv) continue;
+
+        await StockLayer.create([{
+          sourceType: "adjustment",
+          actionLabel: `Refund return — ${String(orderItem.name || "")}`,
+          purchase: null,
+          lineIndex: 0,
+          inventoryItem: invId,
+          supplier: null,
+          createdBy: createdByOid,
+          adjustmentType: "add",
+          receivedAt: new Date(),
+          quantityOriginal: qty,
+          quantityRemaining: qty,
+          unitCost: Number(inv.costPerUnit) || 0,
+        }]);
+
+        await Inventory.updateOne(
+          { _id: invId },
+          { $inc: { currentStock: qty } }
+        );
+      }
+    } else {
+      // ── Prepared item → log as waste, no ingredient reversal ────────────
+      await WasteLog.create({
+        order: order._id,
+        invoice: invoice._id,
+        product: orderItem.product || null,
+        itemName: String(orderItem.name || ""),
+        quantity: refundQty,
+        cost: Math.round(Number(product?.costPrice || 0) * refundQty * 100) / 100,
+        reason: "refund",
+        loggedBy: createdByOid,
+      });
+    }
   }
 }

@@ -3,6 +3,7 @@ import { Router, Response } from "express";
 import { authenticate, AuthenticatedRequest } from "../middleware/auth";
 import { connectDB } from "../lib/mongodb";
 import { sendSuccess, sendError, generateInvoiceNumber } from "../lib/utils";
+import WasteLog from "../models/WasteLog";
 import Invoice from "../models/Invoice";
 import Order from "../models/Order";
 import JournalEntry from "../models/JournalEntry";
@@ -549,9 +550,16 @@ router.post(
         }
       }
 
-      // Return consumed inventory proportional to the refund amount.
-      // Full refund: proportion = 1 (all items back). Partial: proportional to refund value.
-      await restockInventoryForRefund(String(id), refundProportion, req.user.id).catch((err) => {
+      // Restock ready items / log waste for prepared items.
+      // Pass the specific refund items so only the refunded lines are processed.
+      const refundLineItems = (invoice.refundRequest?.items ?? []) as Array<{
+        name: string; refundQuantity: number;
+      }>;
+      await restockInventoryForRefund(
+        String(id),
+        refundLineItems.length ? refundLineItems : null,
+        req.user.id
+      ).catch((err) => {
         console.error("[refund-approve] inventory restock failed (non-fatal):", err?.message);
       });
 
@@ -653,8 +661,8 @@ router.post(
       await invoice.save();
 
       await reverseSaleJournalForInvoice(invoice, req.user.id);
-      // Return all consumed inventory back to stock (full refund = proportion 1)
-      await restockInventoryForRefund(String(invoice._id), 1, req.user.id).catch((err) => {
+      // Full refund: null = process all order items (ready items restocked, prepared → waste log)
+      await restockInventoryForRefund(String(invoice._id), null, req.user.id).catch((err) => {
         console.error("[refund] inventory restock failed (non-fatal):", err?.message);
       });
 
@@ -868,6 +876,44 @@ router.post("/", authenticate, async (req: AuthenticatedRequest, res: Response) 
       error instanceof Error ? error.message || "Failed to create invoice" : "Failed to create invoice";
     console.error("[POST /billing]", error);
     return sendError(res, message, 500);
+  }
+});
+
+// GET /billing/waste-logs — manager report of wasted prepared items from refunds
+router.get("/waste-logs", authenticate, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    await connectDB();
+    if (!(await isAdminOrManagerRoleName(req.user.role))) {
+      return sendError(res, "Unauthorized", 403);
+    }
+
+    const { dateFrom, dateTo, reason } = req.query as Record<string, string>;
+    const query: any = {};
+
+    if (dateFrom || dateTo) {
+      query.createdAt = {};
+      if (dateFrom) query.createdAt.$gte = new Date(dateFrom);
+      if (dateTo) {
+        const d = new Date(dateTo);
+        d.setHours(23, 59, 59, 999);
+        query.createdAt.$lte = d;
+      }
+    }
+    if (reason) query.reason = reason;
+
+    const logs = await WasteLog.find(query)
+      .populate("order", "orderNumber type tableNumber")
+      .populate("invoice", "invoiceNumber")
+      .populate("product", "name")
+      .populate("loggedBy", "name")
+      .sort({ createdAt: -1 })
+      .lean();
+
+    const totalCost = logs.reduce((sum, l: any) => sum + Number(l.cost || 0), 0);
+    return sendSuccess(res, { logs, totalCost });
+  } catch (error) {
+    console.error("[GET /billing/waste-logs]", error);
+    return sendError(res, "Failed to fetch waste logs", 500);
   }
 });
 
